@@ -1,0 +1,5 @@
+# Global owners for all files (except .github/)
+*  @nkbtemmy2 @bumlev
+
+# GitHub folder specific owners
+.github/ @bikaze
