@@ -149,7 +149,8 @@ protect_branch() {
     \"required_pull_request_reviews\": {
       \"required_approving_review_count\": $required_reviews,
       \"dismiss_stale_reviews\": true,
-      \"require_code_owner_reviews\": true
+      \"require_code_owner_reviews\": true,
+      \"require_last_push_approval\": true
     },
     \"restrictions\": null,
     \"allow_force_pushes\": false,

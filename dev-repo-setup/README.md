@@ -177,12 +177,14 @@ All branches (development, staging, production) receive these protections:
    - 1 approval required for all branches
    - Code owner reviews required (CODEOWNERS enforcement)
    - Dismiss stale reviews when new commits are pushed
+   - Require approval of the most recent reviewable push
    - Require resolution of conversation threads before merging
 
 2. **Status Check Requirements**:
 
    - Require status checks to pass before merging
    - Require branches to be up-to-date before merging (strict setting)
+   - Require deployments to succeed before merging
 
 3. **Branch Restrictions**:
 
