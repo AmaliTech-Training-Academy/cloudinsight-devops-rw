@@ -605,7 +605,7 @@ update_existing_repository() {
 create_repository() {
   local REPO=$1
   local REPO_TYPE=$2
-  local DESCRIPTION="CloudInsight DevOps project repository - $REPO ($REPO_TYPE)"
+  local DESCRIPTION="CloudInsight project repository - $REPO ($REPO_TYPE)"
   
   log_info "Creating $REPO_TYPE repository: $REPO"
   
