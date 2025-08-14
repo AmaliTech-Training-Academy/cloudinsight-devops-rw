@@ -27,6 +27,31 @@ The `dev-repo-setup` directory contains tools for automating GitHub repository s
 
 For detailed documentation on these tools, see the [dev-repo-setup README](/dev-repo-setup/README.md).
 
+### [Architecture Documentation](/architecture)
+
+The `architecture` directory contains comprehensive documentation of the CloudInsight infrastructure and CI/CD pipeline:
+
+- **Infrastructure Architecture**: Multi-tier AWS cloud architecture using EKS, RDS, DocumentDB, and MSK
+- **CI/CD Pipeline**: GitOps-based deployment pipeline with GitHub Actions and ArgoCD
+- **Security Framework**: Comprehensive security controls including WAF, Shield, and secret management
+- **Multi-Environment Strategy**: Development, Staging, and Production environment configurations
+
+![CI/CD Architecture](./architecture/cicd-architecture.png)
+
+![Infrastructure Architecture](./architecture/infra-architecture.png)
+
+#### Architecture Highlights
+
+- **Multi-AZ Deployment**: High availability across 2 availability zones
+- **Microservices**: Frontend, User, Cost, Metric, Anomaly, Forecast, and Notification services
+- **Database Strategy**: PostgreSQL RDS for user data, DocumentDB for other backend microservices
+- **Event Streaming**: Amazon MSK (Kafka) for asynchronous communication
+- **GitOps Deployment**: ArgoCD for automated, declarative deployments
+- **Security**: WAF, Shield, TLS encryption, and secret management
+- **Monitoring**: Prometheus, Grafana, and CloudWatch integration
+
+For detailed architecture documentation, see the [Architecture README](/architecture/README.md).
+
 ## 🚀 Getting Started
 
 1. Clone this repository:
