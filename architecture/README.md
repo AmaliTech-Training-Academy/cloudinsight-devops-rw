@@ -267,6 +267,20 @@ Our architecture follows the AWS Well-Architected Framework's six pillars to ens
 - **Health Checks**: Comprehensive application and infrastructure monitoring
 - **Circuit Breakers**: Fault tolerance patterns in microservices
 
+#### **Health Check Endpoints**
+
+Our microservices expose standardized health check endpoints:
+
+##### **Frontend Services**
+- **Endpoint**: `/api/health`
+- **Success Response** (HTTP 200): `{"status": "up"}`
+- **Error Response** (HTTP 500): `{"status": "down"}`
+
+##### **Backend Services**
+- **Endpoint**: `/actuator/health`
+- **Success Response** (HTTP 200): `{"status": "up"}`
+- **Error Response** (HTTP 500): `{"status": "down"}`
+
 #### **Disaster Recovery**
 
 - **RTO (Recovery Time Objective) Target**: 4 hours for full system recovery
