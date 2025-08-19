@@ -59,6 +59,7 @@ Our CI/CD pipeline implements GitOps principles with GitHub Actions for continuo
 - **Build Tools**: pnpm for frontend, Maven for Java backend builds
 - **Integration Testing**: API endpoint testing with test databases
 - **Code Quality**: SonarQube integration for code analysis
+
 #### **Test Coverage**
 
 - **Development**: No minimum coverage requirement during rapid development
@@ -98,11 +99,11 @@ Our CI/CD pipeline implements GitOps principles with GitHub Actions for continuo
 
 ### **Environment-Specific Pipeline Behavior**
 
-| **Environment** | **Branch**       | **Trigger**      | **Testing Level**  | **Deployment Strategy** | **Approval Required** |
-| --------------- | ---------------- | ---------------- | ------------------ | ----------------------- | --------------------- |
-| **Development** | development      | Every commit     | Unit + Integration | Automatic               | No                    |
-| **Staging**     | staging          | Merge to staging | Full test suite    | Automatic               | No                    |
-| **Production**  | production       | Merge to production | E2E + Performance  | Blue-Green              | Yes                   |
+| **Environment** | **Branch**  | **Trigger**         | **Testing Level**  | **Deployment Strategy** | **Approval Required** |
+| --------------- | ----------- | ------------------- | ------------------ | ----------------------- | --------------------- |
+| **Development** | development | Every commit        | Unit + Integration | Automatic               | No                    |
+| **Staging**     | staging     | Merge to staging    | Full test suite    | Automatic               | No                    |
+| **Production**  | production  | Merge to production | E2E + Performance  | Blue-Green              | Yes                   |
 
 ### **Pipeline Monitoring & Observability**
 
@@ -165,6 +166,7 @@ Our infrastructure is built on AWS using best practices for scalability, securit
 - **Route53**: DNS management and health checks
 
 #### **Load Balancing & Ingress**
+
 - **Network Load Balancer (NLB)**: Layer 4 load balancing with SSL/TLS passthrough to NGINX Ingress
 - **AWS Load Balancer Controller**: Kubernetes native load balancer integration
 - **NGINX Ingress**: In-cluster traffic routing and SSL termination
@@ -188,6 +190,7 @@ Our infrastructure is built on AWS using best practices for scalability, securit
 - **NACLs**: Subnet-level network access control
 
 #### **Identity & Access Management**
+
 - **IAM Roles**: Service-specific permissions with least privilege
 - **IRSA**: IAM Roles for Service Accounts in EKS
 - **Pod Identity**: EKS Pod Identity for fine-grained pod-level permissions
@@ -272,11 +275,13 @@ Our architecture follows the AWS Well-Architected Framework's six pillars to ens
 Our microservices expose standardized health check endpoints:
 
 ##### **Frontend Services**
+
 - **Endpoint**: `/api/health`
 - **Success Response** (HTTP 200): `{"status": "up"}`
 - **Error Response** (HTTP 500): `{"status": "down"}`
 
 ##### **Backend Services**
+
 - **Endpoint**: `/actuator/health`
 - **Success Response** (HTTP 200): `{"status": "up"}`
 - **Error Response** (HTTP 500): `{"status": "down"}`
@@ -315,11 +320,11 @@ Our microservices expose standardized health check endpoints:
 
 ##### **General Purpose Node Group Strategy**
 
-| **Node Group Type** | **Instance Types** | **CloudInsight Services** | **Optimization Focus** |
-|-------------------|------------------|-------------------------|----------------------|
-| **Development Environment** | t4g.medium, t4g.large (Graviton spot), fallback to t4g.medium (on-demand) | All CloudInsight Services | 70% cost savings with spot + 20% Graviton efficiency |
-| **Staging Environment** | t4g.large, t4g.xlarge (Graviton spot), fallback to t4g.large (on-demand) | All CloudInsight Services | 60% cost savings with spot + reliable Graviton fallback |
-| **Production Environment** | t4g.large, t4g.xlarge, t4g.2xlarge (Graviton on-demand only) | All CloudInsight Services | Maximum reliability with 20% better price-performance |
+| **Node Group Type**         | **Instance Types**                                                        | **CloudInsight Services** | **Optimization Focus**                                  |
+| --------------------------- | ------------------------------------------------------------------------- | ------------------------- | ------------------------------------------------------- |
+| **Development Environment** | t4g.medium, t4g.large (Graviton spot), fallback to t4g.medium (on-demand) | All CloudInsight Services | 70% cost savings with spot + 20% Graviton efficiency    |
+| **Staging Environment**     | t4g.large, t4g.xlarge (Graviton spot), fallback to t4g.large (on-demand)  | All CloudInsight Services | 60% cost savings with spot + reliable Graviton fallback |
+| **Production Environment**  | t4g.large, t4g.xlarge, t4g.2xlarge (Graviton on-demand only)              | All CloudInsight Services | Maximum reliability with 20% better price-performance   |
 
 **Mixed Instance Strategy with Cluster Autoscaler:**
 
@@ -348,23 +353,23 @@ Our microservices expose standardized health check endpoints:
 
 ##### **Availability Targets**
 
-| **Environment** | **Availability SLA** | **Monthly Downtime** | **Measurement** |
-|-----------------|---------------------|---------------------|-----------------|
-| **Development** | 95% | 36 hours | Best effort |
-| **Staging** | 99% | 7.2 hours | Business hours monitoring |
-| **Production** | 99.9% | 43 minutes | 24/7 monitoring |
+| **Environment** | **Availability SLA** | **Monthly Downtime** | **Measurement**           |
+| --------------- | -------------------- | -------------------- | ------------------------- |
+| **Development** | 95%                  | 36 hours             | Best effort               |
+| **Staging**     | 99%                  | 7.2 hours            | Business hours monitoring |
+| **Production**  | 99.9%                | 43 minutes           | 24/7 monitoring           |
 
 ##### **Response Time Percentiles**
 
-| **Service** | **p50** | **p95** | **p99** | **Timeout** |
-|-------------|---------|---------|---------|-------------|
-| **Frontend** | <200ms | <500ms | <1s | 5s |
-| **User Service** | <100ms | <300ms | <500ms | 10s |
-| **Cost Service** | <200ms | <800ms | <1.5s | 30s |
-| **Metric Service** | <150ms | <600ms | <1s | 15s |
-| **Anomaly Detection** | <500ms | <2s | <5s | 60s |
-| **Forecast Service** | <1s | <5s | <10s | 120s |
-| **Notifications** | <100ms | <300ms | <500ms | 10s |
+| **Service**           | **p50** | **p95** | **p99** | **Timeout** |
+| --------------------- | ------- | ------- | ------- | ----------- |
+| **Frontend**          | <200ms  | <500ms  | <1s     | 5s          |
+| **User Service**      | <100ms  | <300ms  | <500ms  | 10s         |
+| **Cost Service**      | <200ms  | <800ms  | <1.5s   | 30s         |
+| **Metric Service**    | <150ms  | <600ms  | <1s     | 15s         |
+| **Anomaly Detection** | <500ms  | <2s     | <5s     | 60s         |
+| **Forecast Service**  | <1s     | <5s     | <10s    | 120s        |
+| **Notifications**     | <100ms  | <300ms  | <500ms  | 10s         |
 
 ##### **Performance Percentile Explanations**
 
@@ -375,11 +380,11 @@ Our microservices expose standardized health check endpoints:
 
 ##### **Throughput Targets**
 
-| **Service** | **RPS (Requests/Second)** | **Peak Load** | **Concurrent Users** |
-|-------------|---------------------------|---------------|---------------------|
-| **Frontend** | 100 RPS | 500 RPS | 200 |
-| **API Gateway** | 200 RPS | 1000 RPS | 500 |
-| **Database** | 500 TPS | 2000 TPS | N/A |
+| **Service**     | **RPS (Requests/Second)** | **Peak Load** | **Concurrent Users** |
+| --------------- | ------------------------- | ------------- | -------------------- |
+| **Frontend**    | 100 RPS                   | 500 RPS       | 200                  |
+| **API Gateway** | 200 RPS                   | 1000 RPS      | 500                  |
+| **Database**    | 500 TPS                   | 2000 TPS      | N/A                  |
 
 ##### **Error Rate Targets**
 
@@ -414,25 +419,26 @@ We'll use primarily **Cluster Autoscaler** and **HPA** for scaling on EKS:
 #### **Strategic Cost Management**
 
 Aggressive cost optimization maintains our $80 monthly budget during the 10-week development phase.
+
 #### **Infrastructure Costs (10-Week Development)**
 
-| **Environment** | **Configuration** | **Weeks Active** | **Weekly Cost** | **Total Cost** | **Strategy** |
-|-----------------|-------------------|------------------|-----------------|----------------|--------------|
-| **Development** | 1 node (t4g.medium, spot) | Weeks 1-10 | $3-8 | $30-80 | Spot instances (70% savings), auto-shutdown nights/weekends, scale-to-zero during off-hours |
-| **Staging** | 1 node (t4g.large, on-demand) | Weeks 5-10 | $5-10 | $30-60 | Minimal resources, scale down when not testing, weekday-only operation |
-| **Production** | 2 nodes (t4g.large, on-demand) | Weeks 9-10 | $8-12 | $16-24 | Right-sized for demo, minimal production exposure |
-| **Total** | | | **$8-18/week** | **$76-164** | **Separate EKS clusters per environment** |
+| **Environment** | **Configuration**              | **Weeks Active** | **Weekly Cost** | **Total Cost** | **Strategy**                                                                                |
+| --------------- | ------------------------------ | ---------------- | --------------- | -------------- | ------------------------------------------------------------------------------------------- |
+| **Development** | 1 node (t4g.medium, spot)      | Weeks 1-10       | $3-8            | $30-80         | Spot instances (70% savings), auto-shutdown nights/weekends, scale-to-zero during off-hours |
+| **Staging**     | 1 node (t4g.large, on-demand)  | Weeks 5-10       | $5-10           | $30-60         | Minimal resources, scale down when not testing, weekday-only operation                      |
+| **Production**  | 2 nodes (t4g.large, on-demand) | Weeks 9-10       | $8-12           | $16-24         | Right-sized for demo, minimal production exposure                                           |
+| **Total**       |                                |                  | **$8-18/week**  | **$76-164**    | **Separate EKS clusters per environment**                                                   |
 
 #### **Projected Cost Reduction to Under $50**
 
-| **Optimization Strategy** | **Savings** | **Implementation** |
-|---------------------------|-------------|-------------------|
-| **Spot Instances (Dev)** | 70% | Development uses spot instances with automatic fallback |
-| **Auto-Shutdown** | 65% | Scale to zero nights (6pm-8am) and weekends |
-| **Cluster Autoscaler** | 40% | Scale down to minimum during low usage |
-| **Phased Deployment** | 60% | Staging starts week 5, production week 9 only |
-| **Separate Clusters** | 30% | Independent scaling and lifecycle per environment |
-| **Graviton Instances** | 20% | ARM-based instances for better price-performance |
+| **Optimization Strategy** | **Savings** | **Implementation**                                      |
+| ------------------------- | ----------- | ------------------------------------------------------- |
+| **Spot Instances (Dev)**  | 70%         | Development uses spot instances with automatic fallback |
+| **Auto-Shutdown**         | 65%         | Scale to zero nights (6pm-8am) and weekends             |
+| **Cluster Autoscaler**    | 40%         | Scale down to minimum during low usage                  |
+| **Phased Deployment**     | 60%         | Staging starts week 5, production week 9 only           |
+| **Separate Clusters**     | 30%         | Independent scaling and lifecycle per environment       |
+| **Graviton Instances**    | 20%         | ARM-based instances for better price-performance        |
 
 **Realistic 10-Week Budget: $35-45** with phased environment deployment, aggressive scaling policies, spot instance utilization, and separate EKS clusters providing complete environment isolation while maximizing development time and minimizing production costs.
 
@@ -442,6 +448,7 @@ Aggressive cost optimization maintains our $80 monthly budget during the 10-week
 - **Cluster Autoscaler**: Scales to 0 during off-hours for each cluster
 - **Separate EKS Clusters**: Dedicated clusters per environment for complete isolation
 - **Scheduled Scaling**: Dev environment auto-shutdown evenings/weekends
+
 #### **Monitoring & Alerts**
 
 - Daily cost tracking with automated budget reports
@@ -455,15 +462,15 @@ Aggressive cost optimization maintains our $80 monthly budget during the 10-week
 
 ### **10-Week Development Schedule**
 
-| **Week** | **Focus** | **Deliverables** | **Environment** |
-|----------|-----------|------------------|-----------------|
-| **1-2** | Infrastructure | EKS cluster, CI/CD, monitoring | Development |
-| **3-4** | Core Services | User, Cost, Metric services | Development |
-| **5-6** | Advanced Features | Anomaly, Forecast, Notifications | Development |
-| **7** | Integration | E2E testing, performance testing | Staging |
-| **8** | Security | Hardening, compliance validation | Staging |
-| **9** | Production | Production deployment, monitoring | Production |
-| **10** | Demo Prep | UAT, final testing | Production |
+| **Week** | **Focus**         | **Deliverables**                  | **Environment** |
+| -------- | ----------------- | --------------------------------- | --------------- |
+| **1-2**  | Infrastructure    | EKS cluster, CI/CD, monitoring    | Development     |
+| **3-4**  | Core Services     | User, Cost, Metric services       | Development     |
+| **5-6**  | Advanced Features | Anomaly, Forecast, Notifications  | Development     |
+| **7**    | Integration       | E2E testing, performance testing  | Staging         |
+| **8**    | Security          | Hardening, compliance validation  | Staging         |
+| **9**    | Production        | Production deployment, monitoring | Production      |
+| **10**   | Demo Prep         | UAT, final testing                | Production      |
 
 ---
 
@@ -492,9 +499,11 @@ Aggressive cost optimization maintains our $80 monthly budget during the 10-week
 ## 🚀 Getting Started
 
 ### **Prerequisites**
+
 - AWS Account, Terraform v1.5+, kubectl v1.28+, Helm v3.12+, Docker v24.0+
 
 ### **Quick Setup**
+
 1. Clone repository
 2. Configure AWS credentials
 3. Deploy infrastructure: `terraform apply`
@@ -502,31 +511,35 @@ Aggressive cost optimization maintains our $80 monthly budget during the 10-week
 5. ArgoCD auto-syncs applications
 
 ### **Environment Access**
+
 ### **Environment Access URLs**
 
 #### 🔧 **Development Environment**
-| Service | Endpoint | Purpose |
-|---------|----------|---------|
-| **Frontend** | `https://app.dev.cloudinsight.com` | Development application interface |
-| **API Gateway** | `https://api.dev.cloudinsight.com` | Backend API endpoints |
-| **Grafana** | `https://grafana.dev.cloudinsight.com` | Monitoring dashboards |
-| **ArgoCD** | `https://argocd.dev.cloudinsight.com` | GitOps deployment management |
+
+| Service         | Endpoint                               | Purpose                           |
+| --------------- | -------------------------------------- | --------------------------------- |
+| **Frontend**    | `https://app.dev.cloudinsight.com`     | Development application interface |
+| **API Gateway** | `https://api.dev.cloudinsight.com`     | Backend API endpoints             |
+| **Grafana**     | `https://grafana.dev.cloudinsight.com` | Monitoring dashboards             |
+| **ArgoCD**      | `https://argocd.dev.cloudinsight.com`  | GitOps deployment management      |
 
 #### 🧪 **Staging Environment**
-| Service | Endpoint | Purpose |
-|---------|----------|---------|
-| **Frontend** | `https://app.staging.cloudinsight.com` | Pre-production testing |
-| **API Gateway** | `https://api.staging.cloudinsight.com` | Integration testing endpoints |
-| **Grafana** | `https://grafana.staging.cloudinsight.com` | Performance validation |
-| **ArgoCD** | `https://argocd.staging.cloudinsight.com` | Staging deployment control |
+
+| Service         | Endpoint                                   | Purpose                       |
+| --------------- | ------------------------------------------ | ----------------------------- |
+| **Frontend**    | `https://app.staging.cloudinsight.com`     | Pre-production testing        |
+| **API Gateway** | `https://api.staging.cloudinsight.com`     | Integration testing endpoints |
+| **Grafana**     | `https://grafana.staging.cloudinsight.com` | Performance validation        |
+| **ArgoCD**      | `https://argocd.staging.cloudinsight.com`  | Staging deployment control    |
 
 #### 🚀 **Production Environment**
-| Service | Endpoint | Purpose |
-|---------|----------|---------|
-| **Frontend** | `https://www.cloudinsight.com` | Live production application |
-| **API Gateway** | `https://api.cloudinsight.com` | Production API services |
-| **Grafana** | `https://grafana.cloudinsight.com` | Production monitoring |
-| **ArgoCD** | `https://argocd.cloudinsight.com` | Production deployment oversight |
+
+| Service         | Endpoint                           | Purpose                         |
+| --------------- | ---------------------------------- | ------------------------------- |
+| **Frontend**    | `https://www.cloudinsight.com`     | Live production application     |
+| **API Gateway** | `https://api.cloudinsight.com`     | Production API services         |
+| **Grafana**     | `https://grafana.cloudinsight.com` | Production monitoring           |
+| **ArgoCD**      | `https://argocd.cloudinsight.com`  | Production deployment oversight |
 
 > **🔐 Access Note**: Some endpoints require authentication. Contact the DevOps team for credentials and VPN access where applicable.
 
