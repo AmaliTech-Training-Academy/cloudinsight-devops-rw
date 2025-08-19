@@ -16,9 +16,18 @@ ORG="AmaliTech-Training-Academy"
 # Repository configuration
 # Format: "repo_name:type" where type is either "frontend" or "backend"
 REPOS=(
-#   "cloudinsight-devops-rw:backend"
+  "cloudinsight-api-gateway-rw:backend"
+  "cloudinsight-service-discovery-rw:backend"
+  "cloudinsight-config-server-rw:backend"
+  "cloudinsight-config-repo-rw:backend"
+  # "cloudinsight-user-service-rw:backend"
+  # "cloudinsight-cost-service-rw:backend"
+  # "cloudinsight-metric-service-rw:backend"
+  # "cloudinsight-anomaly-service-rw:backend"
+  # "cloudinsight-forecast-service-rw:backend"
+  # "cloudinsight-notification-service-rw:backend"
 #   "cloudinsight-backend-rw:backend"
-  "cloudinsight-frontend-rw:frontend"
+    # "cloudinsight-frontend-rw:frontend"
 #   "cloudinsight-infrastructure-rw:backend"
 #   "cloudinsight-monitoring-rw:backend"
 #   "cloudinsight-ci-cd-rw:backend"
@@ -62,6 +71,19 @@ get_repo_type() {
 get_repo_name() {
   local REPO_CONFIG=$1
   echo "${REPO_CONFIG%%:*}"
+}
+
+# Function to check if repository is an infrastructure repository
+is_infrastructure_repo() {
+  local REPO=$1
+  case "$REPO" in
+    "cloudinsight-api-gateway-rw"|"cloudinsight-service-discovery-rw"|"cloudinsight-config-server-rw"|"cloudinsight-config-repo-rw")
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
 }
 
 # Function to check if user is already a collaborator
@@ -116,20 +138,6 @@ check_and_fix_invitation() {
     return 0
   fi
   
-  # First check if user is already a collaborator with direct access
-  if is_collaborator "$REPO" "$USERNAME"; then
-    log_info "  ✓ @$USERNAME is already a direct collaborator"
-    return 0
-  fi
-  
-  # Check if there's a pending invitation
-  local INVITATION_ID=$(gh api "repos/$ORG/$REPO/invitations" --jq ".[] | select(.invitee.login == \"$USERNAME\") | .id" 2>/dev/null)
-  
-  if [[ -n "$INVITATION_ID" ]]; then
-    log_info "  ✓ @$USERNAME already has a pending invitation"
-    return 0
-  fi
-  
   # Check if user exists first
   if ! gh api "users/$USERNAME" &> /dev/null; then
     log_error "  ❌ Could not invite @$USERNAME - username does not exist"
@@ -142,47 +150,69 @@ check_and_fix_invitation() {
     IS_ORG_MEMBER=true
   fi
   
-  # Try a direct invitation regardless of organization membership status
-  log_info "  → Inviting @$USERNAME with $PERMISSION permissions..."
+  # Check if user is already a collaborator with proper permissions
+  local CURRENT_PERMISSION=$(gh api "repos/$ORG/$REPO/collaborators/$USERNAME/permission" --jq '.permission' 2>/dev/null || echo "none")
+  
+  if [[ "$CURRENT_PERMISSION" != "none" ]]; then
+    if [[ "$CURRENT_PERMISSION" == "$PERMISSION" ]] || [[ "$CURRENT_PERMISSION" == "admin" ]]; then
+      log_info "  ✓ @$USERNAME already has $CURRENT_PERMISSION access (sufficient)"
+      return 0
+    else
+      log_info "  → @$USERNAME has $CURRENT_PERMISSION access, updating to $PERMISSION..."
+    fi
+  fi
+  
+  # Try a direct invitation/permission update regardless of current status
+  log_info "  → Inviting/updating @$USERNAME with $PERMISSION permissions..."
   
   # Use the REST API directly for more reliable operation
   local INVITE_RESULT=$(gh api \
     --method PUT \
     "repos/$ORG/$REPO/collaborators/$USERNAME" \
     -f permission="$PERMISSION" \
-    --silent || echo "ERROR")
+    --silent 2>/dev/null || echo "ERROR")
   
   # Check if invitation was successful
   if [[ "$INVITE_RESULT" == "ERROR" ]]; then
-    # Try one more time with the CLI command as a backup method
+    # Try CLI command as backup method
     if gh repo add-collaborator "$ORG/$REPO" --username "$USERNAME" --permission "$PERMISSION" 2>/dev/null; then
       log_success "  ✓ Successfully invited @$USERNAME ($PERMISSION access) - backup method"
       return 0
     fi
     
-    # Check if user now has access despite the error
-    if gh api "repos/$ORG/$REPO/collaborators/$USERNAME" &> /dev/null; then
-      if [[ "$IS_ORG_MEMBER" == "true" ]]; then
-        log_info "  ✓ @$USERNAME is an org member and has access to the repository"
-      else
-        log_info "  ✓ @$USERNAME already has access to the repository"
-      fi
+    # Try alternative CLI method with different syntax
+    if gh api --method PUT "repos/$ORG/$REPO/collaborators/$USERNAME" --field permission="$PERMISSION" 2>/dev/null; then
+      log_success "  ✓ Successfully invited @$USERNAME ($PERMISSION access) - alternative method"
       return 0
-    else
-      # Final check for pending invitation
-      local INVITATION_ID=$(gh api "repos/$ORG/$REPO/invitations" --jq ".[] | select(.invitee.login == \"$USERNAME\") | .id" 2>/dev/null)
-      if [[ -n "$INVITATION_ID" ]]; then
-        log_info "  ✓ @$USERNAME has a pending invitation (created during retry)"
-        return 0
-      else
-        if [[ "$IS_ORG_MEMBER" == "true" ]]; then
-          log_warning "  ⚠️ Failed to invite @$USERNAME (may already be an org member with appropriate access)"
-        else  
-          log_warning "  ⚠️ Failed to invite @$USERNAME - manual invitation may be needed"
-        fi
-        return 1
-      fi
     fi
+    
+    # Final attempt with basic invitation (no specific permission)
+    if gh api --method PUT "repos/$ORG/$REPO/collaborators/$USERNAME" 2>/dev/null; then
+      log_success "  ✓ Successfully invited @$USERNAME (basic access) - fallback method"
+      return 0
+    fi
+    
+    # Check if user now has access despite the error
+    local FINAL_PERMISSION=$(gh api "repos/$ORG/$REPO/collaborators/$USERNAME/permission" --jq '.permission' 2>/dev/null || echo "none")
+    if [[ "$FINAL_PERMISSION" != "none" ]]; then
+      log_success "  ✓ @$USERNAME now has $FINAL_PERMISSION access"
+      return 0
+    fi
+    
+    # Check for pending invitation
+    local INVITATION_ID=$(gh api "repos/$ORG/$REPO/invitations" --jq ".[] | select(.invitee.login == \"$USERNAME\") | .id" 2>/dev/null)
+    if [[ -n "$INVITATION_ID" ]]; then
+      log_success "  ✓ @$USERNAME has a pending invitation"
+      return 0
+    fi
+    
+    # All methods failed
+    if [[ "$IS_ORG_MEMBER" == "true" ]]; then
+      log_warning "  ⚠️ Failed to invite @$USERNAME (org member) - may need manual intervention"
+    else  
+      log_warning "  ⚠️ Failed to invite @$USERNAME - manual invitation may be needed"
+    fi
+    return 1
   else
     # Successful invitation
     if [[ "$IS_ORG_MEMBER" == "true" ]]; then
@@ -199,8 +229,50 @@ invite_collaborators() {
   local REPO=$1
   local REPO_TYPE=$2
   
-  log_info "Inviting collaborators to $REPO"
+  log_info "Inviting collaborators to $REPO ($REPO_TYPE repository)"
   
+  # Check if this is an infrastructure repository
+  if is_infrastructure_repo "$REPO"; then
+    log_info "  → Infrastructure repository: Inviting only Eric and Oliv..."
+    
+    # Track failures for summary report
+    local FAILED_INVITATIONS=()
+    local SUCCESS_COUNT=0
+    local TOTAL_INVITES=0
+    
+    # Function to process a single invitation
+    process_invitation() {
+      local username=$1
+      local permission=$2
+      local role=$3
+      ((TOTAL_INVITES++))
+      
+      if check_and_fix_invitation "$REPO" "$username" "$permission"; then
+        ((SUCCESS_COUNT++))
+      else
+        FAILED_INVITATIONS+=("$username")
+      fi
+    }
+    
+    # Only invite Eric and Oliv for infrastructure repos
+    process_invitation "ericndungutse" "push" "backend developer"
+    process_invitation "ingabireol" "push" "backend developer"
+    
+    # Print summary of invitations
+    if [[ ${#FAILED_INVITATIONS[@]} -gt 0 ]]; then
+      log_info "Invitation summary: $SUCCESS_COUNT/$TOTAL_INVITES successful"
+      log_warning "The following invitations may need manual attention:"
+      for failed in "${FAILED_INVITATIONS[@]}"; do
+        echo "  - @$failed"
+      done
+      return 1
+    else
+      log_success "All invitations ($SUCCESS_COUNT) processed successfully"
+      return 0
+    fi
+  fi
+  
+  # Regular repository invitation logic (for non-infrastructure repos)
   # Define collaborators based on repo type
   local FRONTEND_COLLABORATORS=("princoo" "muodilo")
   local BACKEND_COLLABORATORS=("ericndungutse" "ingabireol")
@@ -234,6 +306,7 @@ invite_collaborators() {
   process_invitation() {
     local username=$1
     local permission=$2
+    local role=$3  # Role description for logging
     ((TOTAL_INVITES++))
     
     if check_and_fix_invitation "$REPO" "$username" "$permission"; then
@@ -245,12 +318,14 @@ invite_collaborators() {
   
   # Invite type-specific collaborators with write permission
   if [[ "$REPO_TYPE" == "frontend" ]]; then
+    log_info "  → Inviting frontend-specific collaborators..."
     for collaborator in "${FRONTEND_COLLABORATORS[@]}"; do
-      process_invitation "$collaborator" "push"
+      process_invitation "$collaborator" "push" "frontend collaborator"
     done
   elif [[ "$REPO_TYPE" == "backend" ]]; then
+    log_info "  → Inviting backend-specific collaborators..."
     for collaborator in "${BACKEND_COLLABORATORS[@]}"; do
-      process_invitation "$collaborator" "push"
+      process_invitation "$collaborator" "push" "backend collaborator"
     done
   fi
   
@@ -259,8 +334,10 @@ invite_collaborators() {
   
   if [[ "$REPO_TYPE" == "frontend" ]]; then
     REPO_CODEOWNERS=("${FRONTEND_CODEOWNERS[@]}")
+    log_info "  → Inviting frontend codeowners..."
   elif [[ "$REPO_TYPE" == "backend" ]]; then
     REPO_CODEOWNERS=("${BACKEND_CODEOWNERS[@]}")
+    log_info "  → Inviting backend codeowners..."
   fi
   
   # Add universal codeowners to the list
@@ -280,7 +357,23 @@ invite_collaborators() {
   
   # Invite the determined codeowners
   for codeowner in "${REPO_CODEOWNERS[@]}"; do
-    process_invitation "$codeowner" "push"
+    process_invitation "$codeowner" "push" "codeowner"
+  done
+  
+  # Add universal codeowners invitation
+  log_info "  → Inviting universal codeowners..."
+  for universal_owner in "${UNIVERSAL_CODEOWNERS[@]}"; do
+    # Only invite if not already processed above
+    local already_processed=false
+    for processed_owner in "${REPO_CODEOWNERS[@]}"; do
+      if [[ "$processed_owner" == "$universal_owner" ]]; then
+        already_processed=true
+        break
+      fi
+    done
+    if [[ "$already_processed" == false ]]; then
+      process_invitation "$universal_owner" "push" "universal codeowner"
+    fi
   done
   
   # Print summary of invitations
@@ -303,6 +396,72 @@ setup_branches_and_codeowners() {
   local REPO_TYPE=$2
   local TEMP_DIR="/tmp/repo_setup_$$"
   
+  # Get the original script directory before changing to temp directory
+  local ORIGINAL_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  
+  # Check if this is an infrastructure repository
+  if is_infrastructure_repo "$REPO"; then
+    log_info "Setting up infrastructure repository: $REPO (simple setup with README only)"
+    
+    # Create temporary directory
+    mkdir -p "$TEMP_DIR"
+    
+    # Clone the repository
+    if ! git clone "https://github.com/$ORG/$REPO.git" "$TEMP_DIR" &> /dev/null; then
+      log_error "Failed to clone repository $REPO for setup"
+      rm -rf "$TEMP_DIR"
+      return 1
+    fi
+    
+    cd "$TEMP_DIR"
+    
+    # Configure git
+    git config user.email "clmntmugisha@gmail.com"
+    git config user.name "bikaze"
+    
+    # Get current branch name (should be main for new repos)
+    local INITIAL_BRANCH=$(git branch --show-current)
+    
+    # Create/customize README.md
+    echo "# $REPO" > README.md
+    echo "" >> README.md
+    echo "This is the $REPO infrastructure repository." >> README.md
+    echo "" >> README.md
+    echo "## Description" >> README.md
+    echo "Infrastructure component for the CloudInsight platform." >> README.md
+    log_info "  ✓ Created infrastructure README.md"
+    
+    # Commit the README
+    git add README.md
+    if git diff --staged --quiet; then
+      log_info "  ℹ️ No README changes to commit"
+    else
+      git commit -m "Add infrastructure repository README" &> /dev/null
+      log_info "  ✓ Committed README.md"
+    fi
+    
+    # Keep main as default branch for infrastructure repos
+    if [[ "$INITIAL_BRANCH" == "main" ]]; then
+      git push -u origin main
+      log_info "  ✓ Pushed changes to main branch"
+    else
+      # If for some reason the initial branch isn't main, rename it to main
+      git branch -m "$INITIAL_BRANCH" main
+      git push -u origin main
+      log_info "  ✓ Renamed $INITIAL_BRANCH to main and pushed"
+    fi
+
+    # Ensure main is the default branch
+    gh repo edit "$ORG/$REPO" --default-branch main &> /dev/null || true
+    log_info "  ✓ Set main as default branch"    log_info "  ✓ Infrastructure repository setup complete"
+    
+    # Cleanup
+    cd - &> /dev/null
+    rm -rf "$TEMP_DIR"
+    return 0
+  fi
+  
+  # Regular repository setup with CODEOWNERS
   log_info "Setting up branches with strategic CODEOWNERS approach for $REPO"
   
   # Create temporary directory
@@ -321,8 +480,20 @@ setup_branches_and_codeowners() {
   git config user.email "clmntmugisha@gmail.com"
   git config user.name "bikaze"
   
-  local TEMPLATE_DIR="/home/bkz/amalitech/capstone-proj/cloudinsight-devops-rw/templates/$REPO_TYPE"
-  local CODEOWNERS_DIR="/home/bkz/amalitech/capstone-proj/cloudinsight-devops-rw/branch-codeowners"
+  # Use the original script directory to build paths
+  local TEMPLATE_DIR="$ORIGINAL_SCRIPT_DIR/../templates/$REPO_TYPE"
+  local CODEOWNERS_DIR="$ORIGINAL_SCRIPT_DIR/../branch-codeowners"
+  
+  # Verify CODEOWNERS files exist
+  if [[ ! -f "$CODEOWNERS_DIR/CODEOWNERS.staging" ]]; then
+    log_error "❌ Missing staging CODEOWNERS file: $CODEOWNERS_DIR/CODEOWNERS.staging"
+    return 1
+  fi
+  
+  if [[ ! -f "$CODEOWNERS_DIR/CODEOWNERS.production" ]]; then
+    log_error "❌ Missing production CODEOWNERS file: $CODEOWNERS_DIR/CODEOWNERS.production"
+    return 1
+  fi
   
   # Remove branch protection rules for all branches
   for branch in "main" "development" "staging" "production"; do
@@ -399,6 +570,7 @@ setup_branches_and_codeowners() {
   
   # PHASE 1: Setup development branch with development-specific CODEOWNERS
   mkdir -p .github
+  
   if [[ "$REPO_TYPE" == "frontend" ]]; then
     cat > .github/CODEOWNERS << 'EOF'
 # Development branch code owners - Frontend
@@ -428,9 +600,7 @@ EOF
   git checkout -b staging development &> /dev/null
   
   # Replace CODEOWNERS with staging-specific version
-  if [[ -f "$CODEOWNERS_DIR/CODEOWNERS.staging" ]]; then
-    cp "$CODEOWNERS_DIR/CODEOWNERS.staging" .github/CODEOWNERS
-  fi
+  cp "$CODEOWNERS_DIR/CODEOWNERS.staging" .github/CODEOWNERS
   
   git add .github/CODEOWNERS
   git commit -m "Add staging-specific CODEOWNERS" &> /dev/null || true
@@ -442,33 +612,12 @@ EOF
   git checkout -b production development &> /dev/null
   
   # Replace CODEOWNERS with production-specific version
-  if [[ -f "$CODEOWNERS_DIR/CODEOWNERS.production" ]]; then
-    cp "$CODEOWNERS_DIR/CODEOWNERS.production" .github/CODEOWNERS
-  fi
+  cp "$CODEOWNERS_DIR/CODEOWNERS.production" .github/CODEOWNERS
   
   git add .github/CODEOWNERS
   git commit -m "Add production-specific CODEOWNERS" &> /dev/null || true
   git push -u origin production &> /dev/null
   log_info "  ✓ Created production branch from development with production-specific CODEOWNERS"
-  
-  # PHASE 4: STRATEGIC MOVE - Add .gitignore to ignore ONLY future CODEOWNERS changes
-  # This ensures all future commits will have identical hashes across branches
-  for branch in "development" "staging" "production"; do
-    git checkout "$branch" &> /dev/null
-    
-    # Add .gitignore to ONLY ignore CODEOWNERS file changes
-    echo "# Ignore CODEOWNERS changes to maintain identical commit hashes across branches" > .gitignore
-    echo ".github/CODEOWNERS" >> .gitignore
-    
-    git add .gitignore
-    git commit -m "Add .gitignore to maintain identical commits across branches
-
-- Ignore only .github/CODEOWNERS to prevent divergent commits
-- CODEOWNERS files are already in place for access control
-- Future commits will have identical hashes across all branches" &> /dev/null || true
-    git push origin "$branch" &> /dev/null
-    log_info "  ✓ Added .gitignore to $branch (ignores ONLY CODEOWNERS changes)"
-  done
   
   # Return to development branch
   git checkout development &> /dev/null
@@ -477,7 +626,7 @@ EOF
   gh repo edit "$ORG/$REPO" --default-branch development &> /dev/null || true
   log_info "  ✓ Set development as default branch"
   
-  log_info "  ✓ Strategic setup complete: Branch-specific CODEOWNERS in place, future changes ignored"
+  log_info "  ✓ Branch-specific CODEOWNERS setup complete: Each branch has tailored access control"
   
   # Cleanup
   cd - &> /dev/null
@@ -609,10 +758,10 @@ create_repository() {
   
   log_info "Creating $REPO_TYPE repository: $REPO"
   
-  # Create the repository (private, no gitignore, no license)
+  # Create the repository (public, no gitignore, no license)
   if gh repo create "$ORG/$REPO" \
     --description "$DESCRIPTION" \
-    --private \
+    --public \
     --add-readme; then
     
     # Wait a moment for repository to be fully created
@@ -737,11 +886,13 @@ show_help() {
   echo "  - Removes branch protection rules for proper setup"
   echo "  - Validates invitations and recreates invalid ones"
   echo "  - Creates repositories with appropriate templates (frontend/backend)"
-  echo "  - Creates three branches with harmonized commit history: development, staging, production"
-  echo "  - Applies branch-specific CODEOWNERS without causing divergence notifications"
-  echo "  - Uses advanced Git techniques: shared base commit + branch-specific customization"
+  echo "  - Creates three branches: development, staging, production"
+  echo "  - Applies tailored CODEOWNERS files per branch:"
+  echo "    • Development branch: Team-specific code review requirements"
+  echo "    • Staging branch: Staging environment gatekeepers"
+  echo "    • Production branch: Production-only approvers"
+  echo "  - Active GitHub CODEOWNERS enforcement per branch"
   echo "  - Renames main → development (efficient branch management)"
-  echo "  - Prevents 'recent pushes' notifications with harmonized commit ancestry"
   echo "  - Invites collaborators and codeowners with appropriate permissions"
   echo "  - Applies .github/workflows/ci.yml for CI pipeline"
   echo "  - Customizes README.md with repository name"
@@ -790,9 +941,9 @@ main() {
   
   echo
   log_info "Each repository will be created with:"
-  echo "  - Private visibility"
+  echo "  - Public visibility"
   echo "  - Three branches: development (default), staging, production"
-  echo "  - Strategic CODEOWNERS setup (branch-specific but ignored after initial setup):"
+  echo "  - Branch-specific CODEOWNERS setup (tailored access control per branch):"
   echo "    • Development: Frontend/Backend teams + @bikaze for .github/"
   echo "    • Staging: @sntakirutimana72 + @bikaze for .github/"
   echo "    • Production: @bikaze for everything"
@@ -800,10 +951,10 @@ main() {
   echo "    • Checks existing collaborators before inviting"
   echo "    • Frontend repos: @princoo, @muodilo (write access)"
   echo "    • Backend repos: @ericndungutse, @ingabireol (write access)"
-  echo "  - Strategic .gitignore approach:"
-  echo "    • CODEOWNERS files pushed initially for access control"
-  echo "    • .gitignore added to ignore future CODEOWNERS changes"
-  echo "    • Future commits will have identical hashes (no 'recent pushes' notifications)"
+  echo "  - Active CODEOWNERS enforcement:"
+  echo "    • Each branch has its own CODEOWNERS file"
+  echo "    • Branch-specific access control is enforced by GitHub"
+  echo "    • Different approval requirements per branch environment"
   echo "    • Renames main → development (efficient branch management)"
   echo "  - Customized README.md with repository name"
   echo "  - .github/workflows/ci.yml (CI pipeline)"
