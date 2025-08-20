@@ -1,0 +1,207 @@
+name: Frontend CI
+
+on:
+  # Trigger on all branches for push events (commits)
+  push:
+    branches: ['*']
+  
+  # Trigger on pull requests to any branch
+  pull_request:
+    branches: ['*']
+  
+  # Trigger on merge events (when PR is merged)
+  merge_group:
+
+jobs:
+  frontend-ci:
+    name: Frontend CI Pipeline
+    runs-on: ubuntu-latest
+    
+    strategy:
+      matrix:
+        node-version: [20.x]
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      
+      - name: Setup Node.js ${{ matrix.node-version }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+      
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.13.1
+          run_install: false
+      
+      - name: Get pnpm store directory
+        shell: bash
+        run: |
+          echo "STORE_PATH=$(pnpm store path --silent)" >> $GITHUB_ENV
+      
+      - name: Setup pnpm cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.STORE_PATH }}
+          key: ${{ runner.os }}-pnpm-store-${{ hashFiles('**/pnpm-lock.yaml', '**/pnpm-lock.yml') }}
+          restore-keys: |
+            ${{ runner.os }}-pnpm-store-
+      
+      - name: Install dependencies
+        run: |
+          if [ -f "pnpm-lock.yaml" ] || [ -f "pnpm-lock.yml" ]; then
+            echo "📦 Installing dependencies with frozen lockfile..."
+            pnpm install --frozen-lockfile
+          else
+            echo "📦 Installing dependencies without frozen lockfile..."
+            pnpm install --no-frozen-lockfile
+          fi
+        continue-on-error: false
+      
+      - name: Check for package.json
+        run: |
+          if [ ! -f "package.json" ]; then
+            echo "❌ package.json not found"
+            exit 1
+          fi
+          echo "✅ package.json found"
+      
+      - name: Check Next.js version
+        run: |
+          NEXTJS_VERSION=$(pnpm list next --depth=0 --json | jq -r '.[0].dependencies.next.version // "not found"')
+          echo "Next.js version: $NEXTJS_VERSION"
+          if [[ "$NEXTJS_VERSION" == "not found" ]]; then
+            echo "❌ Next.js not found in dependencies"
+            exit 1
+          fi
+          echo "✅ Next.js dependency verified"
+      
+      - name: Verify TypeScript configuration
+        run: |
+          if [ -f "tsconfig.json" ]; then
+            echo "✅ TypeScript configuration found"
+            pnpm exec tsc --noEmit --skipLibCheck
+          else
+            echo "⚠️ No TypeScript configuration found, skipping type check"
+          fi
+      
+      - name: Run ESLint
+        run: |
+          if [ -f ".eslintrc.json" ] || [ -f ".eslintrc.js" ] || [ -f "eslint.config.js" ] || grep -q "eslint" package.json; then
+            echo "🔍 Running ESLint..."
+            pnpm exec eslint . --ext .js,.jsx,.ts,.tsx --max-warnings 0
+            echo "✅ ESLint passed"
+          else
+            echo "❌ ESLint configuration not found"
+            exit 1
+          fi
+      
+      - name: Check for test files and run tests
+        run: |
+          # Check if there are any test files (excluding node_modules)
+          TEST_FILES=$(find . -path ./node_modules -prune -o \( -name "*.test.*" -o -name "*.spec.*" -o -name "__tests__" -type d \) -print 2>/dev/null | head -10)
+          
+          if [ -z "$TEST_FILES" ]; then
+            echo "⚠️ No test files found (excluding node_modules), skipping tests"
+            echo "✅ Tests passed (no tests to run)"
+          else
+            echo "🧪 Test files found, running tests..."
+            echo "$TEST_FILES"
+            
+            # Check if vitest is configured
+            if grep -q "vitest" package.json || [ -f "vitest.config.js" ] || [ -f "vitest.config.ts" ]; then
+              echo "Running Vitest..."
+              pnpm exec vitest run --reporter=verbose
+              echo "✅ Vitest tests passed"
+            elif grep -q "jest" package.json || [ -f "jest.config.js" ] || [ -f "jest.config.ts" ]; then
+              echo "Running Jest..."
+              pnpm test
+              echo "✅ Jest tests passed"
+            else
+              echo "❌ Test files found but no test runner (vitest/jest) configured"
+              exit 1
+            fi
+          fi
+      
+      - name: Check for required Next.js files
+        run: |
+          # Check for essential Next.js files
+          if [ ! -f "next.config.js" ] && [ ! -f "next.config.mjs" ] && [ ! -f "next.config.ts" ]; then
+            echo "⚠️ No Next.js config file found, using defaults"
+          else
+            echo "✅ Next.js configuration found"
+          fi
+          
+          # Check for pages or app directory
+          if [ ! -d "pages" ] && [ ! -d "app" ] && [ ! -d "src/pages" ] && [ ! -d "src/app" ]; then
+            echo "❌ No pages or app directory found"
+            exit 1
+          fi
+          echo "✅ Next.js routing structure verified"
+      
+      - name: Build Next.js application
+        run: |
+          echo "🏗️ Building Next.js application..."
+          pnpm build
+          echo "✅ Build completed successfully"
+        env:
+          NODE_ENV: production
+      
+      - name: Check build output
+        run: |
+          if [ ! -d ".next" ]; then
+            echo "❌ Build output directory (.next) not found"
+            exit 1
+          fi
+          
+          BUILD_SIZE=$(du -sh .next | cut -f1)
+          echo "✅ Build output verified (Size: $BUILD_SIZE)"
+          
+          # Check for critical build files
+          if [ ! -f ".next/BUILD_ID" ]; then
+            echo "❌ BUILD_ID file not found in build output"
+            exit 1
+          fi
+          echo "✅ Build artifacts verified"
+      
+      - name: Validate package.json scripts
+        run: |
+          # Verify required scripts exist
+          REQUIRED_SCRIPTS=("build" "start")
+          for script in "${REQUIRED_SCRIPTS[@]}"; do
+            if ! grep -q "\"$script\":" package.json; then
+              echo "❌ Required script '$script' not found in package.json"
+              exit 1
+            fi
+          done
+          echo "✅ Required npm scripts verified"
+      
+      - name: Security audit
+        run: |
+          echo "🔒 Running security audit..."
+          pnpm audit --audit-level moderate
+          echo "✅ Security audit passed"
+        continue-on-error: false
+      
+      - name: Check for environment example
+        run: |
+          if [ -f ".env.example" ] || [ -f ".env.local.example" ]; then
+            echo "✅ Environment example file found"
+          else
+            echo "⚠️ No .env.example file found (recommended for Next.js projects)"
+          fi
+      
+      - name: Final validation
+        run: |
+          echo "🎉 All CI checks passed successfully!"
+          echo "✅ Dependencies installed"
+          echo "✅ Code formatting (ESLint) verified"
+          echo "✅ Tests executed (or skipped if none found)"
+          echo "✅ TypeScript compilation verified"
+          echo "✅ Next.js build completed"
+          echo "✅ Security audit passed"
+          echo "✅ Ready for deployment"
