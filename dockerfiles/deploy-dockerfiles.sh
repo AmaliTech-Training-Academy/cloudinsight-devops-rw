@@ -15,6 +15,8 @@ ORG="AmaliTech-Training-Academy"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FRONTEND_DOCKERFILE="$SCRIPT_DIR/frontend/Dockerfile"
 BACKEND_DOCKERFILE="$SCRIPT_DIR/backend/Dockerfile"
+FRONTEND_DOCKERIGNORE="$SCRIPT_DIR/frontend/.dockerignore"
+BACKEND_DOCKERIGNORE="$SCRIPT_DIR/backend/.dockerignore"
 TEMP_DIR="/tmp/dockerfile-deployment-$$"
 BRANCHES=("development" "staging" "production")
 
@@ -106,22 +108,30 @@ validate_dockerfile_files() {
     local missing_files=()
     
     if [[ ! -f "$FRONTEND_DOCKERFILE" ]]; then
-        missing_files+=("Frontend: $FRONTEND_DOCKERFILE")
+        missing_files+=("Frontend Dockerfile: $FRONTEND_DOCKERFILE")
     fi
     
     if [[ ! -f "$BACKEND_DOCKERFILE" ]]; then
-        missing_files+=("Backend: $BACKEND_DOCKERFILE")
+        missing_files+=("Backend Dockerfile: $BACKEND_DOCKERFILE")
+    fi
+    
+    if [[ ! -f "$FRONTEND_DOCKERIGNORE" ]]; then
+        missing_files+=("Frontend .dockerignore: $FRONTEND_DOCKERIGNORE")
+    fi
+    
+    if [[ ! -f "$BACKEND_DOCKERIGNORE" ]]; then
+        missing_files+=("Backend .dockerignore: $BACKEND_DOCKERIGNORE")
     fi
     
     if [[ ${#missing_files[@]} -gt 0 ]]; then
-        log_error "Missing Dockerfile files:"
+        log_error "Missing Docker files:"
         for file in "${missing_files[@]}"; do
             log_error "  - $file"
         done
         exit 1
     fi
     
-    log_success "All Dockerfile files found"
+    log_success "All Docker files found (Dockerfile + .dockerignore)"
 }
 
 # Parse repository and type from input
@@ -151,6 +161,20 @@ get_dockerfile() {
         echo "$FRONTEND_DOCKERFILE"
     elif [[ "$repo_type" == "backend" ]]; then
         echo "$BACKEND_DOCKERFILE"
+    else
+        log_error "Unknown repository type: $repo_type"
+        return 1
+    fi
+}
+
+# Get the appropriate .dockerignore based on repository type
+get_dockerignore() {
+    local repo_type="$1"
+    
+    if [[ "$repo_type" == "frontend" ]]; then
+        echo "$FRONTEND_DOCKERIGNORE"
+    elif [[ "$repo_type" == "backend" ]]; then
+        echo "$BACKEND_DOCKERIGNORE"
     else
         log_error "Unknown repository type: $repo_type"
         return 1
@@ -193,6 +217,7 @@ deploy_to_branch() {
     local branch="$2"
     local dockerfile="$3"
     local repo_type="$4"
+    local dockerignore="$5"
     
     log_info "Deploying to branch: $branch"
     
@@ -211,29 +236,31 @@ deploy_to_branch() {
     git config user.email "clmntmugisha@gmail.com"
     git config user.name "bikaze"
     
-    # Copy the appropriate Dockerfile
+    # Copy the appropriate Dockerfile and .dockerignore
     cp "$dockerfile" ./Dockerfile
+    cp "$dockerignore" ./.dockerignore
     
-    # Add the Dockerfile to staging area
-    git add Dockerfile
+    # Add both files to staging area
+    git add Dockerfile .dockerignore
     
     # Always commit and push (force update even if no changes detected)
-    log_info "  📝 Updating Dockerfile on $branch"
+    log_info "  📝 Updating Dockerfile and .dockerignore on $branch"
     
     # Commit changes (use --allow-empty to ensure commit even if no changes)
-    git commit --allow-empty -m "Deploy optimized Dockerfile for $repo_type project
+    git commit --allow-empty -m "Deploy optimized Dockerfile and .dockerignore for $repo_type project
 
 - Add/update production-ready multi-stage Dockerfile
-- Optimized for $repo_type deployment
+- Add/update .dockerignore for optimized builds
+- Optimized for $repo_type deployment with multi-architecture support
 - Automated deployment via deploy-dockerfiles.sh
 - Branch: $branch
 - Timestamp: $(date -u '+%Y-%m-%d %H:%M:%S UTC')" &> /dev/null
     
     # Push changes directly (admin privileges allow bypassing branch protection)
     if git push origin "$branch" &> /dev/null; then
-        log_success "  ✓ Successfully deployed Dockerfile to $branch"
+        log_success "  ✓ Successfully deployed Docker files to $branch"
     else
-        log_error "Failed to push Dockerfile to $branch"
+        log_error "Failed to push Docker files to $branch"
         cd - &> /dev/null
         return 1
     fi
@@ -265,14 +292,19 @@ deploy_to_repository() {
         return 1
     fi
     
-    # Get the appropriate Dockerfile
+    # Get the appropriate Dockerfile and .dockerignore
     if ! dockerfile=$(get_dockerfile "$repo_type"); then
+        return 1
+    fi
+    
+    if ! dockerignore=$(get_dockerignore "$repo_type"); then
         return 1
     fi
     
     log_success "Repository found: $ORG/$repo_name"
     log_info "Repository type: $repo_type"
     log_info "Using Dockerfile: $dockerfile"
+    log_info "Using .dockerignore: $dockerignore"
     
     # Get default branch
     default_branch=$(get_default_branch "$repo_name")
@@ -281,7 +313,7 @@ deploy_to_repository() {
     # Deploy to each branch
     for branch in "${BRANCHES[@]}"; do
         if check_branch_exists "$repo_name" "$branch"; then
-            if deploy_to_branch "$repo_name" "$branch" "$dockerfile" "$repo_type"; then
+            if deploy_to_branch "$repo_name" "$branch" "$dockerfile" "$repo_type" "$dockerignore"; then
                 ((successful_deployments++))
             else
                 ((failed_deployments++))
@@ -361,13 +393,14 @@ USAGE:
     $0 [OPTIONS]
 
 DESCRIPTION:
-    Deploys Dockerfiles to multiple repositories across development, staging, and production branches.
+    Deploys Dockerfiles and .dockerignore files to multiple repositories across development, staging, and production branches.
     
     This script:
     • Validates GitHub CLI authentication and dependencies
-    • Deploys frontend Dockerfile to frontend repositories
-    • Deploys backend Dockerfile to backend repositories  
-    • Creates production-ready multi-stage Docker configurations
+    • Deploys frontend Dockerfile + .dockerignore to frontend repositories
+    • Deploys backend Dockerfile + .dockerignore to backend repositories  
+    • Creates production-ready multi-stage Docker configurations with multi-architecture support
+    • Optimizes build context with .dockerignore files
     • Handles branch protection bypassing (requires admin access)
 
 REPOSITORIES:
@@ -398,8 +431,10 @@ REQUIREMENTS:
     • Internet connection
 
 FILES:
-    • frontend/Dockerfile - Next.js optimized Dockerfile
-    • backend/Dockerfile  - Java Spring Boot optimized Dockerfile
+    • frontend/Dockerfile - Next.js optimized multi-platform Dockerfile
+    • frontend/.dockerignore - Frontend build optimization file
+    • backend/Dockerfile  - Java Spring Boot optimized multi-platform Dockerfile
+    • backend/.dockerignore - Backend build optimization file
 
 EOF
 }

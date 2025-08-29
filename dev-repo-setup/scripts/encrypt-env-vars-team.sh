@@ -30,8 +30,11 @@ jCNcHifTS73KyfMy1y64jUsxWSl3Fm/68kY3S4ci+31poFVNt1EPwiVv/iRqeE+I
 -----END PUBLIC KEY-----"
 
 # Configuration
-ENCRYPTED_OUTPUT="encrypted-env-vars.enc"
-ENCRYPTED_KEY_FILE="encrypted-aes-key.enc"
+# Find repository root (where .git directory is located)
+REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
+ENCRYPTED_OUTPUT="$REPO_ROOT/encrypted-env-vars.enc"
+ENCRYPTED_KEY_FILE="$REPO_ROOT/encrypted-aes-key.enc"
+METADATA_FILE="$REPO_ROOT/encrypted-env-vars.meta"
 
 # Function to print colored output
 print_status() {
@@ -196,13 +199,12 @@ get_developer_info() {
 # Function to create metadata file
 create_metadata() {
     local input_file="$1"
-    local metadata_file="encrypted-env-vars.meta"
     
     local developer_info=$(get_developer_info)
     local timestamp=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
     local file_hash=$(sha256sum "$input_file" | cut -d' ' -f1)
     
-    cat > "$metadata_file" << EOF
+    cat > "$METADATA_FILE" << EOF
 {
   "encrypted_at": "$timestamp",
   "developer": "$developer_info",
@@ -210,17 +212,27 @@ create_metadata() {
   "original_hash": "$file_hash",
   "encryption_method": "RSA-4096 + AES-256",
   "files": {
-    "data": "$ENCRYPTED_OUTPUT",
-    "key": "$ENCRYPTED_KEY_FILE"
+    "data": "$(basename "$ENCRYPTED_OUTPUT")",
+    "key": "$(basename "$ENCRYPTED_KEY_FILE")"
   }
 }
 EOF
     
-    print_status "Metadata saved to: $metadata_file"
+    print_status "Metadata saved to: $METADATA_FILE"
 }
 
 # Main function
 main() {
+    # Setup cleanup trap for any exit (success or failure)
+    cleanup() {
+        echo
+        print_status "🧹 Performing cleanup..."
+        # Remove any temporary files that might have been created
+        rm -f ./temp-pubkey ./temp-aes-key ./aes-key 2>/dev/null
+        print_status "✅ Cleanup completed"
+    }
+    trap cleanup EXIT
+    
     echo
     print_status "🔐 Multi-Developer Environment Variables Encryption"
     print_status "=================================================="
@@ -268,15 +280,15 @@ main() {
         create_metadata "$env_file"
         
         echo
-        print_status "📦 Files created:"
-        print_status "  🔐 $ENCRYPTED_OUTPUT (encrypted environment variables)"
-        print_status "  🗝️  $ENCRYPTED_KEY_FILE (encrypted AES key)"
-        print_status "  📋 encrypted-env-vars.meta (metadata)"
+        print_status "📦 Files created in repository root:"
+        print_status "  🔐 $(basename "$ENCRYPTED_OUTPUT") (encrypted environment variables)"
+        print_status "  🗝️  $(basename "$ENCRYPTED_KEY_FILE") (encrypted AES key)"
+        print_status "  📋 $(basename "$METADATA_FILE") (metadata)"
         
         echo
         print_warning "📋 Next steps:"
         echo "  1. Add encrypted files to Git:"
-        echo "     git add $ENCRYPTED_OUTPUT $ENCRYPTED_KEY_FILE encrypted-env-vars.meta"
+        echo "     git add $(basename "$ENCRYPTED_OUTPUT") $(basename "$ENCRYPTED_KEY_FILE") $(basename "$METADATA_FILE")"
         echo "  2. Commit and push:"
         echo "     git commit -m 'Add encrypted environment variables'"
         echo "     git push"

@@ -84,13 +84,13 @@ chmod +x encrypt-env-vars-team.sh
 ./encrypt-env-vars-team.sh
 
 # Enter path to your .env file
-# Script creates: encrypted-env-vars.enc, encrypted-aes-key.enc, encrypted-env-vars.meta
+# Script creates files in repository root: encrypted-env-vars.enc, encrypted-aes-key.enc, encrypted-env-vars.meta
 ```
 
 ### Committing to Git
 
 ```bash
-# Add encrypted files (safe to commit)
+# Add encrypted files from repository root (safe to commit)
 git add encrypted-env-vars.enc encrypted-aes-key.enc encrypted-env-vars.meta
 
 # Commit and push
@@ -136,18 +136,30 @@ on:
 ## 📁 File Structure
 
 ```
-scripts/
-├── encrypt-env-vars-team.sh     # Developer encryption script (public key embedded)
-├── decrypt-env-vars-team.sh     # Team lead decryption script
-├── team-private-key.pem         # Private key (KEEP SECURE)
-├── team-public-key.pem          # Public key (safe to share)
-└── sample.env                   # Example environment file
+your-repository/                     # Any team repository
+├── encrypted-env-vars.enc           # ✅ Encrypted data (repository root)
+├── encrypted-aes-key.enc            # ✅ Encrypted AES key (repository root)  
+├── encrypted-env-vars.meta          # ✅ Metadata (repository root)
+├── scripts/
+│   └── encrypt-env-vars-team.sh     # 🔐 Developer encryption script
+├── .env                             # ❌ Original file (DO NOT COMMIT)
+└── other-project-files...
 
-encrypted-files/
-├── encrypted-env-vars.enc       # Encrypted data (safe to commit)
-├── encrypted-aes-key.enc        # Encrypted AES key (safe to commit)
-└── encrypted-env-vars.meta      # Metadata (safe to commit)
+devops-repository/
+├── scripts/
+│   ├── encrypt-env-vars-team.sh     # 🔐 Developer encryption script
+│   ├── decrypt-env-vars-team.sh     # 🔓 Team lead decryption script
+│   ├── team-private-key.pem         # 🔒 Private key (KEEP SECURE)
+│   ├── team-public-key.pem          # 📢 Public key (safe to share)
+│   └── sample.env                   # 📝 Example environment file
+└── README-TEAM-ENCRYPTION.md        # 📘 Complete documentation
 ```
+
+**🎯 Key Points:**
+- **Encrypted files are always created in repository root** (not in scripts/ folder)
+- **Easy to find and commit** encrypted files 
+- **Consistent location** across all repositories
+- **Script can be run from anywhere** in the repository
 
 ## 🔒 Security Features
 

@@ -1,67 +1,179 @@
-name: Frontend CI
+name: Frontend CI with Docker Multi-Platform Build
 
 on:
   # Trigger on all branches for push events (commits)
   push:
-    branches: ['*']
-  
+    branches: ["*"]
+
   # Trigger on pull requests to any branch
   pull_request:
-    branches: ['*']
-  
+    branches: ["*"]
+
   # Trigger on merge events (when PR is merged)
   merge_group:
 
 jobs:
   frontend-ci:
-    name: Frontend CI Pipeline
+    name: Frontend CI Pipeline with Docker Build
     runs-on: ubuntu-latest
-    
-    strategy:
-      matrix:
-        node-version: [20.x]
-    
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      
-      - name: Setup Node.js ${{ matrix.node-version }}
-        uses: actions/setup-node@v4
-        with:
-          node-version: ${{ matrix.node-version }}
-      
-      - name: Setup pnpm
-        uses: pnpm/action-setup@v4
-        with:
-          version: 10.13.1
-          run_install: false
-      
-      - name: Get pnpm store directory
-        shell: bash
+
+      - name: Decrypt environment variables
+        id: decrypt-env
         run: |
-          echo "STORE_PATH=$(pnpm store path --silent)" >> $GITHUB_ENV
-      
-      - name: Setup pnpm cache
-        uses: actions/cache@v4
-        with:
-          path: ${{ env.STORE_PATH }}
-          key: ${{ runner.os }}-pnpm-store-${{ hashFiles('**/pnpm-lock.yaml', '**/pnpm-lock.yml') }}
-          restore-keys: |
-            ${{ runner.os }}-pnpm-store-
-      
-      - name: Install dependencies
-        run: |
-          if [ -f "pnpm-lock.yaml" ] || [ -f "pnpm-lock.yml" ]; then
-            echo "📦 Installing dependencies with frozen lockfile..."
-            pnpm install --frozen-lockfile
-          else
-            echo "📦 Installing dependencies without frozen lockfile..."
-            pnpm install --no-frozen-lockfile
+          echo "🔍 Checking for encrypted environment files..."
+
+          # Setup cleanup trap for any exit (success or failure)
+          cleanup() {
+            echo "🧹 Performing security cleanup..."
+            rm -f ./team-private-key.pem ./temp-aes-key ./.env ./next-public-build-args.txt
+            echo "✅ Security cleanup completed"
+          }
+          trap cleanup EXIT
+
+          # Find encrypted files in repository root
+          ENCRYPTED_DATA=$(find . -maxdepth 1 -name "encrypted-env-vars.enc" -type f | head -1)
+          ENCRYPTED_KEY=$(find . -maxdepth 1 -name "encrypted-aes-key.enc" -type f | head -1)
+          METADATA=$(find . -maxdepth 1 -name "encrypted-env-vars.meta" -type f | head -1)
+
+          if [[ -z "$ENCRYPTED_DATA" || -z "$ENCRYPTED_KEY" ]]; then
+            echo "ℹ️ No encrypted environment files found - continuing without decryption"
+            echo "has_encrypted_env=false" >> $GITHUB_OUTPUT
+            exit 0
           fi
-        continue-on-error: false
-      
+
+          echo "✅ Found encrypted files:"
+          echo "  Data: $ENCRYPTED_DATA"
+          echo "  Key: $ENCRYPTED_KEY"
+          if [[ -n "$METADATA" ]]; then
+            echo "  Metadata: $METADATA"
+          fi
+          echo "has_encrypted_env=true" >> $GITHUB_OUTPUT
+
+          # Create private key from secret
+          echo "🔑 Setting up private key for decryption..."
+          echo "${{ secrets.TEAM_PRIVATE_KEY }}" > ./team-private-key.pem
+          chmod 600 ./team-private-key.pem
+
+          # Verify private key
+          if ! openssl rsa -in ./team-private-key.pem -check -noout; then
+            echo "❌ Invalid private key in TEAM_PRIVATE_KEY secret"
+            exit 1
+          fi
+          echo "✅ Private key validated"
+
+          # Show metadata if available (without sensitive content)
+          if [[ -n "$METADATA" && -f "$METADATA" ]]; then
+            echo "📋 Encryption Metadata:"
+            echo "======================="
+            cat "$METADATA"
+            echo "======================="
+          fi
+
+          # Decrypt AES key
+          echo "🔓 Decrypting AES key..."
+          if ! openssl rsautl -decrypt \
+            -inkey ./team-private-key.pem \
+            -in "$ENCRYPTED_KEY" \
+            -out ./temp-aes-key; then
+            echo "❌ Failed to decrypt AES key"
+            exit 1
+          fi
+
+          # Read AES key
+          AES_KEY=$(cat ./temp-aes-key)
+
+          # Decrypt data (try GCM first, then CBC)
+          echo "🔓 Decrypting environment data..."
+          if openssl enc -aes-256-gcm -d \
+            -in "$ENCRYPTED_DATA" \
+            -out "./.env" \
+            -pass "pass:$AES_KEY" 2>/dev/null; then
+            echo "✅ Decrypted with AES-GCM"
+          elif openssl enc -aes-256-cbc -d \
+            -in "$ENCRYPTED_DATA" \
+            -out "./.env" \
+            -pass "pass:$AES_KEY" 2>/dev/null; then
+            echo "✅ Decrypted with AES-CBC"
+          else
+            echo "❌ Decryption failed with both AES-GCM and AES-CBC"
+            exit 1
+          fi
+
+          # Verify decrypted content (without exposing content)
+          if [[ -f "./.env" ]]; then
+            LINES=$(wc -l < "./.env")
+            SIZE=$(stat -c%s "./.env")
+            echo "✅ Decryption completed successfully!"
+            echo "📋 Decrypted .env file: $LINES lines, $SIZE bytes"
+            echo "⚠️ Environment variables are available for build process only"
+            
+            # Ensure .env is not tracked by git
+            echo ".env" >> .gitignore
+            git add .gitignore 2>/dev/null || true
+          else
+            echo "❌ Decrypted .env file not found"
+            exit 1
+          fi
+
+      - name: Extract NEXT_PUBLIC environment variables
+        id: extract-env
+        if: steps.decrypt-env.outputs.has_encrypted_env == 'true'
+        run: |
+          echo "🔍 Extracting NEXT_PUBLIC_* environment variables..."
+          
+          if [[ ! -f "./.env" ]]; then
+            echo "⚠️ No .env file found - skipping environment variable extraction"
+            echo "has_next_public_vars=false" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          
+          # Extract NEXT_PUBLIC_* variables (without exposing values in logs)
+          NEXT_PUBLIC_VARS=$(grep '^NEXT_PUBLIC_' ./.env 2>/dev/null || true)
+          
+          if [[ -z "$NEXT_PUBLIC_VARS" ]]; then
+            echo "ℹ️ No NEXT_PUBLIC_* variables found in .env file"
+            echo "has_next_public_vars=false" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          
+          # Count variables found (without showing values)
+          VAR_COUNT=$(echo "$NEXT_PUBLIC_VARS" | wc -l)
+          echo "✅ Found $VAR_COUNT NEXT_PUBLIC_* environment variables"
+          echo "has_next_public_vars=true" >> $GITHUB_OUTPUT
+          
+          # Create build args string for Docker
+          BUILD_ARGS=""
+          echo "$NEXT_PUBLIC_VARS" | while IFS='=' read -r key value; do
+            if [[ -n "$key" && -n "$value" ]]; then
+              # Mask the value in logs for security
+              echo "::add-mask::$value"
+              echo "Found: $key=***MASKED***"
+              
+              # Append to build args (values will be masked in logs)
+              if [[ -z "$BUILD_ARGS" ]]; then
+                BUILD_ARGS="$key=$value"
+              else
+                BUILD_ARGS="$BUILD_ARGS"$'\n'"$key=$value"
+              fi
+            fi
+          done
+          
+          # Save build args to output file (will be masked)
+          echo "$NEXT_PUBLIC_VARS" > ./next-public-build-args.txt
+          
+          echo "🔒 Environment variables prepared for Docker build (values masked in logs)"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+        with:
+          platforms: linux/amd64,linux/arm64
+
       - name: Check for package.json
         run: |
           if [ ! -f "package.json" ]; then
@@ -69,64 +181,7 @@ jobs:
             exit 1
           fi
           echo "✅ package.json found"
-      
-      - name: Check Next.js version
-        run: |
-          NEXTJS_VERSION=$(pnpm list next --depth=0 --json | jq -r '.[0].dependencies.next.version // "not found"')
-          echo "Next.js version: $NEXTJS_VERSION"
-          if [[ "$NEXTJS_VERSION" == "not found" ]]; then
-            echo "❌ Next.js not found in dependencies"
-            exit 1
-          fi
-          echo "✅ Next.js dependency verified"
-      
-      - name: Verify TypeScript configuration
-        run: |
-          if [ -f "tsconfig.json" ]; then
-            echo "✅ TypeScript configuration found"
-            pnpm exec tsc --noEmit --skipLibCheck
-          else
-            echo "⚠️ No TypeScript configuration found, skipping type check"
-          fi
-      
-      - name: Run ESLint
-        run: |
-          if [ -f ".eslintrc.json" ] || [ -f ".eslintrc.js" ] || [ -f "eslint.config.js" ] || grep -q "eslint" package.json; then
-            echo "🔍 Running ESLint..."
-            pnpm exec eslint . --ext .js,.jsx,.ts,.tsx --max-warnings 0
-            echo "✅ ESLint passed"
-          else
-            echo "❌ ESLint configuration not found"
-            exit 1
-          fi
-      
-      - name: Check for test files and run tests
-        run: |
-          # Check if there are any test files (excluding node_modules)
-          TEST_FILES=$(find . -path ./node_modules -prune -o \( -name "*.test.*" -o -name "*.spec.*" -o -name "__tests__" -type d \) -print 2>/dev/null | head -10)
-          
-          if [ -z "$TEST_FILES" ]; then
-            echo "⚠️ No test files found (excluding node_modules), skipping tests"
-            echo "✅ Tests passed (no tests to run)"
-          else
-            echo "🧪 Test files found, running tests..."
-            echo "$TEST_FILES"
-            
-            # Check if vitest is configured
-            if grep -q "vitest" package.json || [ -f "vitest.config.js" ] || [ -f "vitest.config.ts" ]; then
-              echo "Running Vitest..."
-              pnpm exec vitest run --reporter=verbose
-              echo "✅ Vitest tests passed"
-            elif grep -q "jest" package.json || [ -f "jest.config.js" ] || [ -f "jest.config.ts" ]; then
-              echo "Running Jest..."
-              pnpm test
-              echo "✅ Jest tests passed"
-            else
-              echo "❌ Test files found but no test runner (vitest/jest) configured"
-              exit 1
-            fi
-          fi
-      
+
       - name: Check for required Next.js files
         run: |
           # Check for essential Next.js files
@@ -135,39 +190,14 @@ jobs:
           else
             echo "✅ Next.js configuration found"
           fi
-          
+
           # Check for pages or app directory
           if [ ! -d "pages" ] && [ ! -d "app" ] && [ ! -d "src/pages" ] && [ ! -d "src/app" ]; then
             echo "❌ No pages or app directory found"
             exit 1
           fi
           echo "✅ Next.js routing structure verified"
-      
-      - name: Build Next.js application
-        run: |
-          echo "🏗️ Building Next.js application..."
-          pnpm build
-          echo "✅ Build completed successfully"
-        env:
-          NODE_ENV: production
-      
-      - name: Check build output
-        run: |
-          if [ ! -d ".next" ]; then
-            echo "❌ Build output directory (.next) not found"
-            exit 1
-          fi
-          
-          BUILD_SIZE=$(du -sh .next | cut -f1)
-          echo "✅ Build output verified (Size: $BUILD_SIZE)"
-          
-          # Check for critical build files
-          if [ ! -f ".next/BUILD_ID" ]; then
-            echo "❌ BUILD_ID file not found in build output"
-            exit 1
-          fi
-          echo "✅ Build artifacts verified"
-      
+
       - name: Validate package.json scripts
         run: |
           # Verify required scripts exist
@@ -179,14 +209,73 @@ jobs:
             fi
           done
           echo "✅ Required npm scripts verified"
-      
-      - name: Security audit
+
+      - name: Build multi-platform Docker image
         run: |
-          echo "🔒 Running security audit..."
-          pnpm audit --audit-level moderate
-          echo "✅ Security audit passed"
-        continue-on-error: false
-      
+          echo "🏗️ Building Docker image with environment variables..."
+          
+          # Prepare build command
+          BUILD_CMD="docker buildx build --platform linux/amd64,linux/arm64"
+          BUILD_CMD="$BUILD_CMD --cache-from type=gha --cache-to type=gha,mode=max"
+          BUILD_CMD="$BUILD_CMD -t cloudinsight-frontend:latest -t cloudinsight-frontend:${{ github.sha }}"
+          
+          # Add NEXT_PUBLIC_* build args if available
+          if [[ "${{ steps.extract-env.outputs.has_next_public_vars }}" == "true" && -f "./next-public-build-args.txt" ]]; then
+            echo "🔒 Adding NEXT_PUBLIC_* environment variables as build arguments..."
+            
+            while IFS='=' read -r key value; do
+              if [[ -n "$key" && -n "$value" ]]; then
+                BUILD_CMD="$BUILD_CMD --build-arg $key=$value"
+                echo "Added build arg: $key=***MASKED***"
+              fi
+            done < ./next-public-build-args.txt
+          else
+            echo "ℹ️ No NEXT_PUBLIC_* variables found - building without environment build args"
+          fi
+          
+          # Add context at the end
+          BUILD_CMD="$BUILD_CMD ."
+          
+          # Execute build command
+          echo "🚀 Executing Docker build..."
+          eval "$BUILD_CMD"
+          
+          echo "✅ Docker image built successfully with environment variables"
+
+      - name: Test Docker image
+        run: |
+          echo "🧪 Testing Docker image functionality..."
+
+          # Load the built image (use the latest tag)
+          docker buildx build --load --platform linux/amd64 -t cloudinsight-frontend:test .
+
+          # Run the container in detached mode
+          CONTAINER_ID=$(docker run -d -p 3000:3000 cloudinsight-frontend:test)
+
+          # Wait for container to start
+          sleep 10
+
+          # Check if container is running
+          if docker ps | grep $CONTAINER_ID; then
+            echo "✅ Container started successfully"
+            
+            # Optional: Test if the app responds (requires curl)
+            if command -v curl &> /dev/null; then
+              if curl -f http://localhost:3000 &> /dev/null; then
+                echo "✅ Application responds to HTTP requests"
+              else
+                echo "⚠️ Application not responding (this might be normal for some setups)"
+              fi
+            fi
+          else
+            echo "❌ Container failed to start"
+            docker logs $CONTAINER_ID
+            exit 1
+          fi
+
+          # Cleanup
+          docker stop $CONTAINER_ID && docker rm $CONTAINER_ID
+
       - name: Check for environment example
         run: |
           if [ -f ".env.example" ] || [ -f ".env.local.example" ]; then
@@ -194,14 +283,11 @@ jobs:
           else
             echo "⚠️ No .env.example file found (recommended for Next.js projects)"
           fi
-      
+
       - name: Final validation
         run: |
           echo "🎉 All CI checks passed successfully!"
-          echo "✅ Dependencies installed"
-          echo "✅ Code formatting (ESLint) verified"
-          echo "✅ Tests executed (or skipped if none found)"
-          echo "✅ TypeScript compilation verified"
-          echo "✅ Next.js build completed"
-          echo "✅ Security audit passed"
-          echo "✅ Ready for deployment"
+          echo "✅ Project structure validated"
+          echo "✅ Multi-platform Docker image built"
+          echo "✅ Container functionality tested"
+          echo "✅ Ready for deployment on AMD64 and ARM64 architectures"

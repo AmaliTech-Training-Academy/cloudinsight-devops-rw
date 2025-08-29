@@ -13,10 +13,11 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
-# Default file names
-DEFAULT_ENCRYPTED_DATA="encrypted-env-vars.enc"
-DEFAULT_ENCRYPTED_KEY="encrypted-aes-key.enc"
-DEFAULT_METADATA="encrypted-env-vars.meta"
+# Default file names - look in repository root
+REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
+DEFAULT_ENCRYPTED_DATA="$REPO_ROOT/encrypted-env-vars.enc"
+DEFAULT_ENCRYPTED_KEY="$REPO_ROOT/encrypted-aes-key.enc"
+DEFAULT_METADATA="$REPO_ROOT/encrypted-env-vars.meta"
 DEFAULT_OUTPUT="decrypted-env-vars"
 
 # Function to print colored output
@@ -214,6 +215,17 @@ preview_content() {
 
 # Main function
 main() {
+    # Setup cleanup trap for any exit (success or failure)
+    cleanup() {
+        echo
+        print_status "🧹 Performing security cleanup..."
+        # Remove any temporary files that might have been created
+        rm -f ./temp-aes-key ./decrypted-*.env 2>/dev/null
+        # Note: We don't remove the output .env file as it's the intended result
+        print_status "✅ Security cleanup completed"
+    }
+    trap cleanup EXIT
+    
     echo
     print_status "🔓 Team Lead Environment Variables Decryption"
     print_status "============================================="
