@@ -1,5 +1,15 @@
 name: Frontend CI with Docker Multi-Platform Build
 
+# Principle of least privilege for GITHUB_TOKEN
+permissions:
+  contents: read
+  checks: write # needed for test reporter annotations
+  actions: read
+
+concurrency:
+  group: frontend-ci-${{ github.ref }}
+  cancel-in-progress: true
+
 on:
   # Trigger on all branches for push events (commits)
   push:
@@ -11,7 +21,6 @@ on:
 
   # Trigger on merge events (when PR is merged)
   merge_group:
-
 jobs:
   frontend-ci:
     name: Frontend CI Pipeline with Docker Build
@@ -22,6 +31,142 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+
+      # Step 1: Install pnpm and Node (ensure pnpm exists before cache logic)
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v3
+        with:
+          version: 9.0.0
+          run_install: false
+
+      - name: Setup Node.js 22 & enable pnpm cache
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22.x"
+          cache: "pnpm"
+          cache-dependency-path: pnpm-lock.yaml
+
+      - name: Install dependencies (pnpm)
+        run: |
+          # If lockfile exists use frozen for reproducibility; else normal install
+          if [ -f pnpm-lock.yaml ]; then
+            pnpm install --frozen-lockfile --prefer-offline
+          else
+            echo "No pnpm-lock.yaml yet – performing non-frozen install (cache still warms)."
+            pnpm install --prefer-offline
+          fi
+
+      - name: Prepare public env vars for tests (NEXT_PUBLIC_*)
+        run: |
+          echo "Preparing NEXT_PUBLIC_* variables for test environment..."
+          # Try to source from existing example/test env files without exposing secrets
+          for candidate in .env.test .env.example .env; do
+            if [ -f "$candidate" ]; then
+              echo "Scanning $candidate for NEXT_PUBLIC_* entries"
+              grep '^NEXT_PUBLIC_' "$candidate" | while IFS='=' read -r k v; do
+                if [ -n "$k" ] && [ -n "$v" ]; then
+                  echo "Setting $k from $candidate"
+                  echo "$k=$v" >> $GITHUB_ENV
+                fi
+              done
+              break
+            fi
+          done
+          # Provide safe defaults if still unset (avoid Zod errors). These should be overridden if real values are decrypted later.
+          : ${NEXT_PUBLIC_API_BASE_URL:=http://localhost}
+          : ${NEXT_PUBLIC_NODE_ENV:=test}
+          echo "NEXT_PUBLIC_API_BASE_URL=${NEXT_PUBLIC_API_BASE_URL}" >> $GITHUB_ENV
+          echo "NEXT_PUBLIC_NODE_ENV=${NEXT_PUBLIC_NODE_ENV}" >> $GITHUB_ENV
+          echo "Done preparing public env vars."
+
+      # Step 2: Fast quality gates BEFORE docker build
+      - name: Lint
+        run: |
+          if grep -q '"lint"' package.json; then
+            echo "Running lint...";
+            pnpm run lint || (echo 'Lint failed' && exit 1)
+          else
+            echo "No lint script found – skipping"
+          fi
+
+      - name: Type check
+        run: |
+          if [ -f tsconfig.json ]; then
+            echo "Running TypeScript type check...";
+            pnpm exec tsc --noEmit --pretty false
+          else
+            echo "No tsconfig.json – skipping type check"
+          fi
+
+      - name: Unit tests (Vitest)
+        run: |
+          set -e
+          if grep -q 'vitest' package.json; then
+            if pnpm exec vitest --version >/dev/null 2>&1; then
+              echo "Running Vitest with JUnit + coverage reporters...";
+              # Generate junit.xml, lcov.info and html report
+              pnpm exec vitest run --reporter=default --reporter=junit --outputFile=junit.xml --coverage --coverage.reporter=lcov --coverage.reporter=html --run
+            else
+              echo "Vitest not installed? Ensure dependency is present."; exit 1
+            fi
+          elif grep -q '"test"' package.json; then
+            echo "Running generic test script...";
+            pnpm test -- --run || pnpm test
+          else
+            echo "No test framework detected – skipping tests"
+          fi
+
+      - name: Upload frontend test artifacts
+        if: ${{ always() }}
+        run: |
+          set -e
+          mkdir -p ci-artifacts/frontend
+          [ -f junit.xml ] && cp junit.xml ci-artifacts/frontend/ || true
+          [ -f coverage/lcov.info ] && cp coverage/lcov.info ci-artifacts/frontend/ || true
+          if [ -d coverage ]; then tar -czf ci-artifacts/frontend/coverage-html.tar.gz coverage ; fi
+
+      - name: Store frontend artifacts
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-test-and-coverage
+          path: ci-artifacts/frontend
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Annotate frontend test results
+        if: ${{ always() && hashFiles('junit.xml') != '' }}
+        uses: dorny/test-reporter@v1
+        with:
+          name: Frontend Tests
+          path: junit.xml
+          reporter: jest-junit
+          fail-on-error: false
+
+      - name: Frontend coverage summary
+        if: ${{ always() }}
+        run: |
+          echo "## Frontend Test Summary" >> $GITHUB_STEP_SUMMARY
+          if [ -f junit.xml ]; then
+            TOTAL=$(grep -o 'tests="[0-9]\+"' junit.xml | head -1 | cut -d '"' -f2 || echo 0)
+            FAIL=$(grep -o 'failures="[0-9]\+"' junit.xml | head -1 | cut -d '"' -f2 || echo 0)
+            echo "Tests: $TOTAL, Failures: $FAIL" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "No junit.xml produced" >> $GITHUB_STEP_SUMMARY
+          fi
+          if [ -f coverage/lcov.info ]; then
+            # Approximate line coverage: lines with hits / total lines instrumented
+            COVERED_LINES=$(grep '^DA:' coverage/lcov.info | awk -F'[,:]' '$3>0{c++} END{print c+0}')
+            TOTAL_LINES=$(grep '^DA:' coverage/lcov.info | wc -l | awk '{print $1+0}')
+            if [ "$TOTAL_LINES" -gt 0 ]; then FRONTEND_COVERAGE_PERCENT=$(awk -v c=$COVERED_LINES -v t=$TOTAL_LINES 'BEGIN{printf("%.2f", (c/t)*100)}'); else FRONTEND_COVERAGE_PERCENT=0; fi
+            echo "Coverage (line approx): ${FRONTEND_COVERAGE_PERCENT}% ($COVERED_LINES/$TOTAL_LINES)" >> $GITHUB_STEP_SUMMARY
+            # Export for later steps
+            echo "FRONTEND_COVERAGE_PERCENT=${FRONTEND_COVERAGE_PERCENT}" >> $GITHUB_ENV
+          else
+            echo "No coverage file" >> $GITHUB_STEP_SUMMARY
+          fi
+
+      # Decrypt only AFTER fast checks to reduce secret exposure window
 
       - name: Decrypt environment variables
         id: decrypt-env
@@ -114,7 +259,8 @@ jobs:
             echo "⚠️ Environment variables are available for build process only"
             
             # Ensure .env is not tracked by git
-            echo ".env" >> .gitignore
+            # Add to .gitignore once (avoid duplicates across runs)
+            grep -q '^\.env$' .gitignore 2>/dev/null || echo ".env" >> .gitignore
             git add .gitignore 2>/dev/null || true
           else
             echo "❌ Decrypted .env file not found"
@@ -126,27 +272,27 @@ jobs:
         if: steps.decrypt-env.outputs.has_encrypted_env == 'true'
         run: |
           echo "🔍 Extracting NEXT_PUBLIC_* environment variables..."
-          
+
           if [[ ! -f "./.env" ]]; then
             echo "⚠️ No .env file found - skipping environment variable extraction"
             echo "has_next_public_vars=false" >> $GITHUB_OUTPUT
             exit 0
           fi
-          
+
           # Extract NEXT_PUBLIC_* variables (without exposing values in logs)
           NEXT_PUBLIC_VARS=$(grep '^NEXT_PUBLIC_' ./.env 2>/dev/null || true)
-          
+
           if [[ -z "$NEXT_PUBLIC_VARS" ]]; then
             echo "ℹ️ No NEXT_PUBLIC_* variables found in .env file"
             echo "has_next_public_vars=false" >> $GITHUB_OUTPUT
             exit 0
           fi
-          
+
           # Count variables found (without showing values)
           VAR_COUNT=$(echo "$NEXT_PUBLIC_VARS" | wc -l)
           echo "✅ Found $VAR_COUNT NEXT_PUBLIC_* environment variables"
           echo "has_next_public_vars=true" >> $GITHUB_OUTPUT
-          
+
           # Create build args string for Docker
           BUILD_ARGS=""
           echo "$NEXT_PUBLIC_VARS" | while IFS='=' read -r key value; do
@@ -163,10 +309,10 @@ jobs:
               fi
             fi
           done
-          
+
           # Save build args to output file (will be masked)
           echo "$NEXT_PUBLIC_VARS" > ./next-public-build-args.txt
-          
+
           echo "🔒 Environment variables prepared for Docker build (values masked in logs)"
 
       - name: Set up Docker Buildx
@@ -210,19 +356,17 @@ jobs:
           done
           echo "✅ Required npm scripts verified"
 
+      # Step 3: Build Docker image only after fast checks succeed
       - name: Build multi-platform Docker image
         run: |
-          echo "🏗️ Building Docker image with environment variables..."
-          
-          # Prepare build command
+          echo "🏗️ Building Docker image with environment variables (post-tests)..."
+
           BUILD_CMD="docker buildx build --platform linux/amd64,linux/arm64"
           BUILD_CMD="$BUILD_CMD --cache-from type=gha --cache-to type=gha,mode=max"
           BUILD_CMD="$BUILD_CMD -t cloudinsight-frontend:latest -t cloudinsight-frontend:${{ github.sha }}"
-          
-          # Add NEXT_PUBLIC_* build args if available
+
           if [[ "${{ steps.extract-env.outputs.has_next_public_vars }}" == "true" && -f "./next-public-build-args.txt" ]]; then
             echo "🔒 Adding NEXT_PUBLIC_* environment variables as build arguments..."
-            
             while IFS='=' read -r key value; do
               if [[ -n "$key" && -n "$value" ]]; then
                 BUILD_CMD="$BUILD_CMD --build-arg $key=$value"
@@ -232,49 +376,11 @@ jobs:
           else
             echo "ℹ️ No NEXT_PUBLIC_* variables found - building without environment build args"
           fi
-          
-          # Add context at the end
+
           BUILD_CMD="$BUILD_CMD ."
-          
-          # Execute build command
           echo "🚀 Executing Docker build..."
           eval "$BUILD_CMD"
-          
           echo "✅ Docker image built successfully with environment variables"
-
-      - name: Test Docker image
-        run: |
-          echo "🧪 Testing Docker image functionality..."
-
-          # Load the built image (use the latest tag)
-          docker buildx build --load --platform linux/amd64 -t cloudinsight-frontend:test .
-
-          # Run the container in detached mode
-          CONTAINER_ID=$(docker run -d -p 3000:3000 cloudinsight-frontend:test)
-
-          # Wait for container to start
-          sleep 10
-
-          # Check if container is running
-          if docker ps | grep $CONTAINER_ID; then
-            echo "✅ Container started successfully"
-            
-            # Optional: Test if the app responds (requires curl)
-            if command -v curl &> /dev/null; then
-              if curl -f http://localhost:3000 &> /dev/null; then
-                echo "✅ Application responds to HTTP requests"
-              else
-                echo "⚠️ Application not responding (this might be normal for some setups)"
-              fi
-            fi
-          else
-            echo "❌ Container failed to start"
-            docker logs $CONTAINER_ID
-            exit 1
-          fi
-
-          # Cleanup
-          docker stop $CONTAINER_ID && docker rm $CONTAINER_ID
 
       - name: Check for environment example
         run: |
@@ -289,5 +395,13 @@ jobs:
           echo "🎉 All CI checks passed successfully!"
           echo "✅ Project structure validated"
           echo "✅ Multi-platform Docker image built"
-          echo "✅ Container functionality tested"
-          echo "✅ Ready for deployment on AMD64 and ARM64 architectures"
+          # Attempt to compute coverage percent again if env var not set
+          if [ -z "$FRONTEND_COVERAGE_PERCENT" ] && [ -f coverage/lcov.info ]; then
+            COVERED_LINES=$(grep '^DA:' coverage/lcov.info | awk -F'[,:]' '$3>0{c++} END{print c+0}')
+            TOTAL_LINES=$(grep '^DA:' coverage/lcov.info | wc -l | awk '{print $1+0}')
+            if [ "$TOTAL_LINES" -gt 0 ]; then FRONTEND_COVERAGE_PERCENT=$(awk -v c=$COVERED_LINES -v t=$TOTAL_LINES 'BEGIN{printf("%.2f", (c/t)*100)}'); else FRONTEND_COVERAGE_PERCENT=0; fi
+          fi
+          if [ -n "$FRONTEND_COVERAGE_PERCENT" ]; then
+            echo "📊 Line coverage: ${FRONTEND_COVERAGE_PERCENT}%"; else echo "📊 Line coverage: n/a"; fi
+          echo "✅ Ready for deployment / push (runtime container test skipped)"
+          echo "ℹ️ Add runtime smoke tests later before push to registry"

@@ -78,10 +78,10 @@ README.md
 *.md
 docs/
 
-# Package manager
+# Package manager (keep lockfiles for reproducible/cached Docker layer installs)
 package-lock.json
 yarn.lock
-pnpm-lock.yaml
+# pnpm-lock.yaml intentionally kept (do NOT ignore)
 
 # ESLint
 .eslintcache

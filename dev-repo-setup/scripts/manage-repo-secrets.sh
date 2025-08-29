@@ -32,7 +32,7 @@ REPOS=(
     "cloudinsight-notification-service-rw:backend"
     
     # Frontend
-    # "cloudinsight-frontend-rw:frontend"
+    "cloudinsight-frontend-rw:frontend"
     
     # Infrastructure (uncomment if needed)
     # "cloudinsight-infrastructure-rw:backend"
@@ -41,9 +41,10 @@ REPOS=(
 )
 
 # Global arrays to store secrets
-declare -a SECRET_NAMES
-declare -a SECRET_VALUES
-declare -a SECRET_DESCRIPTIONS
+declare -a SECRET_NAMES            # Secret names
+declare -a SECRET_VALUES           # Either literal value OR file path (when SECRET_IS_FILE[index] == 1)
+declare -a SECRET_DESCRIPTIONS     # Optional descriptions
+declare -a SECRET_IS_FILE          # 1 if value should be read from file at deploy time, else 0
 
 # Logging functions
 log_info() {
@@ -132,6 +133,25 @@ secret_name_exists() {
 }
 
 # Function to input a single secret
+validate_secret_file() {
+    local path="$1"
+    if [[ -z "$path" ]]; then
+        log_error "File path cannot be empty"
+        return 1
+    fi
+    if [[ ! -f "$path" ]]; then
+        log_error "File '$path' not found"
+        return 1
+    fi
+    # GitHub secrets currently allow up to 64 KB (approx); warn if larger
+    local size
+    size=$(wc -c < "$path" 2>/dev/null || echo 0)
+    if (( size > 64000 )); then
+        log_warning "File size $size bytes may exceed GitHub secret limit (~64 KB)"
+    fi
+    return 0
+}
+
 input_secret() {
     local secret_num="$1"
     
@@ -165,17 +185,47 @@ input_secret() {
         break
     done
     
-    # Get secret value (hidden input)
-    local secret_value=""
-    while [[ -z "$secret_value" ]]; do
-        echo
-        read -s -p "🔐 Enter secret value for '$secret_name' (hidden): " secret_value
-        echo
-        
-        if [[ -z "$secret_value" ]]; then
-            log_warning "Secret value cannot be empty"
-        fi
+    # Choose input method
+    echo
+    echo "Input methods:"
+    echo "  1) Direct hidden entry"
+    echo "  2) Read from file (preserves multiline e.g., private keys)"
+    local method=""
+    while true; do
+      read -p "🛠️  Choose input method [1/2]: " method
+      [[ -z "$method" ]] && method=1
+      if [[ "$method" == "1" || "$method" == "2" ]]; then break; fi
+      log_warning "Enter 1 or 2"
     done
+
+    local secret_value=""
+    local is_file=0
+    if [[ "$method" == "1" ]]; then
+        # Direct hidden entry
+        while [[ -z "$secret_value" ]]; do
+            echo
+            read -s -p "🔐 Enter secret value for '$secret_name' (hidden): " secret_value
+            echo
+            if [[ -z "$secret_value" ]]; then
+                log_warning "Secret value cannot be empty"
+            fi
+        done
+    else
+        # File input
+        while true; do
+            echo
+            read -p "📄 Enter path to file containing value for '$secret_name': " secret_value
+            if validate_secret_file "$secret_value"; then
+                is_file=1
+                # Brief summary
+                local size lines
+                size=$(wc -c < "$secret_value" 2>/dev/null || echo 0)
+                lines=$(wc -l < "$secret_value" 2>/dev/null || echo 0)
+                log_info "File accepted: $secret_value ($lines lines, $size bytes)"
+                break
+            fi
+        done
+    fi
     
     # Get optional description
     echo
@@ -185,6 +235,7 @@ input_secret() {
     SECRET_NAMES+=("$secret_name")
     SECRET_VALUES+=("$secret_value")
     SECRET_DESCRIPTIONS+=("$secret_description")
+    SECRET_IS_FILE+=("$is_file")
     
     log_success "Secret '$secret_name' configured"
 }
@@ -240,16 +291,25 @@ show_secrets_summary() {
     
     for i in "${!SECRET_NAMES[@]}"; do
         local name="${SECRET_NAMES[$i]}"
-        local value="${SECRET_VALUES[$i]}"
         local desc="${SECRET_DESCRIPTIONS[$i]}"
-        local masked_value=$(echo "$value" | sed 's/./*/g' | cut -c1-20)
-        
-        echo "  $((i+1)). $name"
-        echo "     Value: $masked_value (${#value} characters)"
-        if [[ -n "$desc" ]]; then
-            echo "     Description: $desc"
+        local is_file="${SECRET_IS_FILE[$i]:-0}"
+        if [[ "$is_file" == "1" ]]; then
+            local path="${SECRET_VALUES[$i]}"
+            local size lines
+            size=$(wc -c < "$path" 2>/dev/null || echo 0)
+            lines=$(wc -l < "$path" 2>/dev/null || echo 0)
+            echo "  $((i+1)). $name"
+            echo "     Source: file '$path' ($lines lines, $size bytes)"
+            [[ -n "$desc" ]] && echo "     Description: $desc"
+            echo
+        else
+            local value="${SECRET_VALUES[$i]}"
+            local masked_value=$(echo "$value" | sed 's/./*/g' | cut -c1-20)
+            echo "  $((i+1)). $name"
+            echo "     Value: $masked_value (${#value} characters)"
+            [[ -n "$desc" ]] && echo "     Description: $desc"
+            echo
         fi
-        echo
     done
 }
 
@@ -257,16 +317,29 @@ show_secrets_summary() {
 set_repository_secret() {
     local repo="$1"
     local secret_name="$2"
-    local secret_value="$3"
-    
+    local secret_value="$3"   # literal value or file path
+    local is_file="$4"
+
     log_info "  Setting '$secret_name' in $repo..."
-    
-    if echo "$secret_value" | gh secret set "$secret_name" --repo "$ORG/$repo" 2>/dev/null; then
-        log_success "    ✅ Successfully set '$secret_name'"
-        return 0
+
+    if [[ "$is_file" == "1" ]]; then
+        # Read from file preserving formatting
+        if gh secret set "$secret_name" --repo "$ORG/$repo" < "$secret_value" 2>/dev/null; then
+            log_success "    ✅ Set (file) '$secret_name'"
+            return 0
+        else
+            log_error "    ❌ Failed to set (file) '$secret_name'"
+            return 1
+        fi
     else
-        log_error "    ❌ Failed to set '$secret_name'"
-        return 1
+        # Literal value
+        if printf '%s' "$secret_value" | gh secret set "$secret_name" --repo "$ORG/$repo" 2>/dev/null; then
+            log_success "    ✅ Set '$secret_name'"
+            return 0
+        else
+            log_error "    ❌ Failed to set '$secret_name'"
+            return 1
+        fi
     fi
 }
 
@@ -292,7 +365,8 @@ process_repository() {
         local secret_name="${SECRET_NAMES[$i]}"
         local secret_value="${SECRET_VALUES[$i]}"
         
-        if set_repository_secret "$repo_name" "$secret_name" "$secret_value"; then
+    local is_file="${SECRET_IS_FILE[$i]:-0}"
+    if set_repository_secret "$repo_name" "$secret_name" "$secret_value" "$is_file"; then
             ((success_count++))
         fi
     done

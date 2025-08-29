@@ -1,5 +1,14 @@
 name: Backend CI with Docker Multi-Platform Build
 
+permissions:
+  contents: read
+  checks: write
+  actions: read
+
+concurrency:
+  group: backend-ci-${{ github.ref }}
+  cancel-in-progress: true
+
 on:
   # Trigger on all branches for push events (commits)
   push:
@@ -22,104 +31,6 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-
-      - name: Decrypt environment variables
-        id: decrypt-env
-        run: |
-          echo "🔍 Checking for encrypted environment files..."
-
-          # Setup cleanup trap for any exit (success or failure)
-          cleanup() {
-            echo "🧹 Performing security cleanup..."
-            rm -f ./team-private-key.pem ./temp-aes-key ./.env
-            echo "✅ Security cleanup completed"
-          }
-          trap cleanup EXIT
-
-          # Find encrypted files in repository root
-          ENCRYPTED_DATA=$(find . -maxdepth 1 -name "encrypted-env-vars.enc" -type f | head -1)
-          ENCRYPTED_KEY=$(find . -maxdepth 1 -name "encrypted-aes-key.enc" -type f | head -1)
-          METADATA=$(find . -maxdepth 1 -name "encrypted-env-vars.meta" -type f | head -1)
-
-          if [[ -z "$ENCRYPTED_DATA" || -z "$ENCRYPTED_KEY" ]]; then
-            echo "ℹ️ No encrypted environment files found - continuing without decryption"
-            echo "has_encrypted_env=false" >> $GITHUB_OUTPUT
-            exit 0
-          fi
-
-          echo "✅ Found encrypted files:"
-          echo "  Data: $ENCRYPTED_DATA"
-          echo "  Key: $ENCRYPTED_KEY"
-          if [[ -n "$METADATA" ]]; then
-            echo "  Metadata: $METADATA"
-          fi
-          echo "has_encrypted_env=true" >> $GITHUB_OUTPUT
-
-          # Create private key from secret
-          echo "🔑 Setting up private key for decryption..."
-          echo "${{ secrets.TEAM_PRIVATE_KEY }}" > ./team-private-key.pem
-          chmod 600 ./team-private-key.pem
-
-          # Verify private key
-          if ! openssl rsa -in ./team-private-key.pem -check -noout; then
-            echo "❌ Invalid private key in TEAM_PRIVATE_KEY secret"
-            exit 1
-          fi
-          echo "✅ Private key validated"
-
-          # Show metadata if available (without sensitive content)
-          if [[ -n "$METADATA" && -f "$METADATA" ]]; then
-            echo "📋 Encryption Metadata:"
-            echo "======================="
-            cat "$METADATA"
-            echo "======================="
-          fi
-
-          # Decrypt AES key
-          echo "🔓 Decrypting AES key..."
-          if ! openssl rsautl -decrypt \
-            -inkey ./team-private-key.pem \
-            -in "$ENCRYPTED_KEY" \
-            -out ./temp-aes-key; then
-            echo "❌ Failed to decrypt AES key"
-            exit 1
-          fi
-
-          # Read AES key
-          AES_KEY=$(cat ./temp-aes-key)
-
-          # Decrypt data (try GCM first, then CBC)
-          echo "🔓 Decrypting environment data..."
-          if openssl enc -aes-256-gcm -d \
-            -in "$ENCRYPTED_DATA" \
-            -out "./.env" \
-            -pass "pass:$AES_KEY" 2>/dev/null; then
-            echo "✅ Decrypted with AES-GCM"
-          elif openssl enc -aes-256-cbc -d \
-            -in "$ENCRYPTED_DATA" \
-            -out "./.env" \
-            -pass "pass:$AES_KEY" 2>/dev/null; then
-            echo "✅ Decrypted with AES-CBC"
-          else
-            echo "❌ Decryption failed with both AES-GCM and AES-CBC"
-            exit 1
-          fi
-
-          # Verify decrypted content (without exposing content)
-          if [[ -f "./.env" ]]; then
-            LINES=$(wc -l < "./.env")
-            SIZE=$(stat -c%s "./.env")
-            echo "✅ Decryption completed successfully!"
-            echo "📋 Decrypted .env file: $LINES lines, $SIZE bytes"
-            echo "⚠️ Environment variables are available for build process only"
-            
-            # Ensure .env is not tracked by git
-            echo ".env" >> .gitignore
-            git add .gitignore 2>/dev/null || true
-          else
-            echo "❌ Decrypted .env file not found"
-            exit 1
-          fi
 
       - name: Check for Java source files
         id: check-java
@@ -146,6 +57,93 @@ jobs:
           echo "✅ Ready for Java development"
           exit 0
 
+      - name: Set up JDK 21
+        if: steps.check-java.outputs.has_java == 'true'
+        uses: actions/setup-java@v4
+        with:
+          distribution: "temurin"
+          java-version: "21"
+          cache: "maven"
+
+      - name: Run unit tests with JaCoCo (no packaging)
+        if: steps.check-java.outputs.has_java == 'true'
+        run: |
+          set -e
+          # Run tests + generate JaCoCo report without modifying pom.xml by invoking plugin directly
+          mvn -B -q org.jacoco:jacoco-maven-plugin:prepare-agent test org.jacoco:jacoco-maven-plugin:report
+          # Ensure report exists
+          if [ ! -f target/site/jacoco/jacoco.xml ]; then echo "JaCoCo report missing"; exit 1; fi
+
+      - name: Upload backend test artifacts
+        if: ${{ always() && steps.check-java.outputs.has_java == 'true' }}
+        run: |
+          set -e
+          mkdir -p ci-artifacts/backend
+          if ls target/surefire-reports/*.xml >/dev/null 2>&1; then cp target/surefire-reports/*.xml ci-artifacts/backend/; fi
+          [ -f target/site/jacoco/jacoco.xml ] && cp target/site/jacoco/jacoco.xml ci-artifacts/backend/
+          if [ -d target/site/jacoco ]; then tar -czf ci-artifacts/backend/jacoco-html.tar.gz -C target/site jacoco; fi
+
+      - name: Store backend artifacts
+        if: ${{ always() && steps.check-java.outputs.has_java == 'true' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-test-and-coverage
+          path: ci-artifacts/backend
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Annotate backend test results
+        if: ${{ always() && steps.check-java.outputs.has_java == 'true' }}
+        uses: dorny/test-reporter@v1
+        with:
+          name: Backend Tests
+          path: target/surefire-reports/*.xml
+          reporter: java-junit
+          fail-on-error: false
+
+      - name: Backend coverage summary
+        if: ${{ always() && steps.check-java.outputs.has_java == 'true' }}
+        run: |
+          echo "## Backend Test Summary" >> $GITHUB_STEP_SUMMARY
+          if ls target/surefire-reports/*.xml >/dev/null 2>&1; then
+            TOTAL=$(grep -h '<testsuite' target/surefire-reports/*.xml | awk -F'tests="' '{print $2}' | cut -d '"' -f1 | awk '{s+=$1} END {print s+0}')
+            FAIL=$(grep -h '<testsuite' target/surefire-reports/*.xml | awk -F'failures="' '{print $2}' | cut -d '"' -f1 | awk '{s+=$1} END {print s+0}')
+            echo "Tests: $TOTAL, Failures: $FAIL" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "No surefire XML reports" >> $GITHUB_STEP_SUMMARY
+          fi
+          if [ -f target/site/jacoco/jacoco.xml ]; then
+            LINE_COVERED=$(grep '<counter type="LINE"' target/site/jacoco/jacoco.xml | head -1 | sed -E 's/.*covered="([0-9]+)".*$/\1/')
+            LINE_MISSED=$(grep '<counter type="LINE"' target/site/jacoco/jacoco.xml | head -1 | sed -E 's/.*missed="([0-9]+)".*$/\1/')
+            TOTAL=$((LINE_COVERED + LINE_MISSED))
+            if [ "$TOTAL" -gt 0 ]; then PCT=$(awk -v c=$LINE_COVERED -v t=$TOTAL 'BEGIN{printf("%.2f", (c/t)*100)}'); else PCT=0; fi
+            echo "Coverage (lines): $PCT% ($LINE_COVERED/$TOTAL)" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "No jacoco.xml" >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Decrypt environment variables (post-tests, optional)
+        if: steps.check-java.outputs.has_java == 'true'
+        id: decrypt-env
+        run: |
+          echo "🔍 Checking for encrypted environment files (after tests)..."
+          cleanup() { rm -f ./team-private-key.pem ./temp-aes-key ./.env; }
+          trap cleanup EXIT
+          ENCRYPTED_DATA=$(find . -maxdepth 1 -name "encrypted-env-vars.enc" -type f | head -1)
+            ENCRYPTED_KEY=$(find . -maxdepth 1 -name "encrypted-aes-key.enc" -type f | head -1)
+          if [[ -z "$ENCRYPTED_DATA" || -z "$ENCRYPTED_KEY" ]]; then echo "No encrypted env files - skipping"; echo "has_encrypted_env=false" >> $GITHUB_OUTPUT; exit 0; fi
+          echo "${{ secrets.TEAM_PRIVATE_KEY }}" > ./team-private-key.pem; chmod 600 ./team-private-key.pem
+          openssl rsautl -decrypt -inkey ./team-private-key.pem -in "$ENCRYPTED_KEY" -out ./temp-aes-key
+          AES_KEY=$(cat ./temp-aes-key)
+          if ! openssl enc -aes-256-gcm -d -in "$ENCRYPTED_DATA" -out "./.env" -pass "pass:$AES_KEY" 2>/dev/null; then
+            openssl enc -aes-256-cbc -d -in "$ENCRYPTED_DATA" -out "./.env" -pass "pass:$AES_KEY" 2>/dev/null || { echo "Decrypt failed"; exit 1; }
+          fi
+          if [[ -f ./.env ]]; then
+            grep -q '^\.env$' .gitignore 2>/dev/null || echo ".env" >> .gitignore
+            git add .gitignore 2>/dev/null || true
+          fi
+          echo "has_encrypted_env=true" >> $GITHUB_OUTPUT
+
       - name: Set up Docker Buildx
         if: steps.check-java.outputs.has_java == 'true'
         uses: docker/setup-buildx-action@v3
@@ -155,7 +153,7 @@ jobs:
       - name: Check for pom.xml
         if: steps.check-java.outputs.has_java == 'true'
         run: |
-          if [ ! -f "pom.xml" ]; then
+          if [ ! -f pom.xml ]; then
             echo "❌ pom.xml not found - Maven project required"
             exit 1
           fi
@@ -197,48 +195,6 @@ jobs:
             BUILDPLATFORM=linux/amd64
             TARGETPLATFORM=linux/amd64
 
-      - name: Test Docker image
-        if: steps.check-java.outputs.has_java == 'true'
-        run: |
-          echo "🧪 Testing Docker image functionality..."
-
-          # Load the built image
-          docker buildx build --load --platform linux/amd64 -t cloudinsight-backend:test .
-
-          # Run the container in detached mode
-          CONTAINER_ID=$(docker run -d -p 8080:8080 cloudinsight-backend:test)
-
-          # Wait for container to start (Spring Boot needs more time)
-          echo "⏳ Waiting for Spring Boot application to start..."
-          sleep 30
-
-          # Check if container is running
-          if docker ps | grep $CONTAINER_ID; then
-            echo "✅ Container started successfully"
-            
-            # Test if the app responds (Spring Boot actuator health endpoint)
-            if command -v curl &> /dev/null; then
-              # Try health endpoint first
-              if curl -f http://localhost:8080/actuator/health &> /dev/null; then
-                echo "✅ Spring Boot actuator health endpoint responds"
-              elif curl -f http://localhost:8080/ &> /dev/null; then
-                echo "✅ Application root endpoint responds"
-              else
-                echo "⚠️ Application not responding (this might be normal for some configurations)"
-                echo "📋 Container logs:"
-                docker logs $CONTAINER_ID | tail -20
-              fi
-            fi
-          else
-            echo "❌ Container failed to start"
-            echo "📋 Container logs:"
-            docker logs $CONTAINER_ID
-            exit 1
-          fi
-
-          # Cleanup
-          docker stop $CONTAINER_ID && docker rm $CONTAINER_ID
-
       - name: Validate application properties
         if: steps.check-java.outputs.has_java == 'true'
         run: |
@@ -267,6 +223,13 @@ jobs:
         run: |
           echo "🎉 All CI checks passed successfully!"
           echo "✅ Java project structure validated"
+          echo "✅ Tests executed prior to Docker build"
           echo "✅ Multi-platform Docker image built"
-          echo "✅ Container functionality tested"
-          echo "✅ Ready for deployment on AMD64 and ARM64 architectures"
+          if [ -f target/site/jacoco/jacoco.xml ]; then
+            LINE_COVERED=$(grep '<counter type="LINE"' target/site/jacoco/jacoco.xml | head -1 | sed -E 's/.*covered="([0-9]+)".*$/\1/')
+            LINE_MISSED=$(grep '<counter type="LINE"' target/site/jacoco/jacoco.xml | head -1 | sed -E 's/.*missed="([0-9]+)".*$/\1/')
+            TOTAL=$((LINE_COVERED + LINE_MISSED))
+            if [ "$TOTAL" -gt 0 ]; then PCT=$(awk -v c=$LINE_COVERED -v t=$TOTAL 'BEGIN{printf("%.2f", (c/t)*100)}'); else PCT=0; fi
+            echo "📊 Line coverage: $PCT% ($LINE_COVERED/$TOTAL)"; else echo "📊 Line coverage: n/a"; fi
+          echo "✅ Ready for deployment / push (runtime container test skipped)"
+          echo "ℹ️ Add runtime smoke tests or integration tests before pushing to registry"

@@ -27,12 +27,12 @@ REPOS=(
     "cloudinsight-frontend-rw:frontend"
     
     # Backend repositories  
-    "cloudinsight-user-service-rw:backend"
-    "cloudinsight-cost-service-rw:backend"
-    "cloudinsight-metric-service-rw:backend"
-    "cloudinsight-anomaly-service-rw:backend"
-    "cloudinsight-forecast-service-rw:backend"
-    "cloudinsight-notification-service-rw:backend"
+    # "cloudinsight-user-service-rw:backend"
+    # "cloudinsight-cost-service-rw:backend"
+    # "cloudinsight-metric-service-rw:backend"
+    # "cloudinsight-anomaly-service-rw:backend"
+    # "cloudinsight-forecast-service-rw:backend"
+    # "cloudinsight-notification-service-rw:backend"
     
     # Add more repositories as needed
     # "your-repo-name:frontend"
