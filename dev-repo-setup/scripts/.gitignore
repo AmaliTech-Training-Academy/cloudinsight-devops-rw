@@ -1,0 +1,24 @@
+# Environment Variables - Never commit these!
+*.env
+.env*
+!sample.env
+
+# Decrypted files - Never commit these!
+decrypted-*
+*-decrypted
+*.decrypted
+
+# Private keys - Never commit these!
+*-private-key.pem
+*_private_key.pem
+private-*.pem
+
+# Temporary files
+*.tmp
+temp-*
+*.temp
+
+# Old/backup files
+*-old.*
+*-backup.*
+*.bak
