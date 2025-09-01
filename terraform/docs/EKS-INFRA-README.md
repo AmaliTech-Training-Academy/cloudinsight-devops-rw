@@ -14,6 +14,7 @@
 ---
 
 ## 📚 Table of Contents
+
 1. [Overview](#-overview)
 2. [Repository Topology](#-repository-topology)
 3. [Remote State Bootstrap](#-remote-state-bootstrap)
@@ -37,7 +38,9 @@
 ---
 
 ## 🔎 Overview
+
 End-to-end implementation of:
+
 - Terraform remote state (S3 + DynamoDB locking)
 - Modular networking (VPC, subnets, IGW, NAT, routes)
 - Uniform tagging & CostCenter convention
@@ -46,6 +49,7 @@ End-to-end implementation of:
 > Focus: A clear, evolvable baseline—secure & feature enhancements layered later (IRSA, addons, private endpoint, multi-AZ NAT, etc.).
 
 ## 🗂 Repository Topology
+
 ```
 terraform/
   bootstrap/                  # Remote state backend (S3 + DynamoDB)
@@ -59,29 +63,35 @@ terraform/
       networking/             # Composes VPC + IGW + NAT + routes
       eks/                    # EKS stack consuming networking outputs
 ```
+
 State separation:
+
 ```
 dev-staging/networking.tfstate
 dev-staging/eks.tfstate
 ```
 
 ## 🔐 Remote State Bootstrap
+
 Location: `terraform/bootstrap/`
 
-| Component | Purpose |
-|-----------|---------|
-| S3 Bucket | Versioned & encrypted backend state storage |
-| DynamoDB  | State locking & consistency guard |
+| Component | Purpose                                       |
+| --------- | --------------------------------------------- |
+| S3 Bucket | Versioned & encrypted backend state storage   |
+| DynamoDB  | State locking & consistency guard             |
 | Tagging   | Standard keys for cost, ownership, automation |
 
 CostCenter policy:
+
 - Bootstrap stack → `<project>-bootstrap`
 - Other stacks → `<project>-<environment>`
 
 ## 🧭 Environment Strategy
+
 Single hybrid environment: `dev-staging` (accelerates early iteration). Naming leaves space for later promotion (split into `dev/` + `staging/`).
 
 ## 🏗 Networking Stack
+
 Composition (`envs/dev-staging/networking`):
 | Module / Block | Responsibility |
 |----------------|----------------|
@@ -99,18 +109,21 @@ Subnet discovery tags:
 Outputs consumed downstream: `vpc_id`, `public_subnet_ids`, `private_subnet_ids`.
 
 ## 🏷 Tagging Strategy
-| Tag | Meaning |
-|-----|---------|
-| Project | Logical workload grouping |
-| Environment | Environment name (`dev-staging`) |
-| Stack | Current layer (bootstrap / networking / eks) |
-| ManagedBy | Always `terraform` |
-| CostCenter | Chargeback keyword `<project>-<environment>` |
-| Owner | Team ownership reference (e.g. `team-alpha`) |
-| Stage | Redundant human-friendly env label |
+
+| Tag         | Meaning                                      |
+| ----------- | -------------------------------------------- |
+| Project     | Logical workload grouping                    |
+| Environment | Environment name (`dev-staging`)             |
+| Stack       | Current layer (bootstrap / networking / eks) |
+| ManagedBy   | Always `terraform`                           |
+| CostCenter  | Chargeback keyword `<project>-<environment>` |
+| Owner       | Team ownership reference (e.g. `team-alpha`) |
+| Stage       | Redundant human-friendly env label           |
 
 ## 🔁 Cross-Stack Remote State
+
 `envs/dev-staging/eks/main.tf`:
+
 ```hcl
 data "terraform_remote_state" "networking" {
   backend = "s3"
@@ -126,9 +139,11 @@ locals {
   private_subnet_ids = data.terraform_remote_state.networking.outputs.private_subnet_ids
 }
 ```
+
 Deprecated `dynamodb_table` arg removed (lock already handled by writers).
 
 ## ☸ EKS Module
+
 Contained in `modules/eks`:
 | Resource | Notes |
 |----------|-------|
@@ -140,18 +155,20 @@ Contained in `modules/eks`:
 Outputs: `cluster_name`, `cluster_endpoint`, `cluster_version`, `cluster_arn`.
 
 ## ⚙ Node Group Parameters
-| Variable | Purpose |
-|----------|---------|
-| `node_group_name` | Node group identifier |
-| `node_instance_types` | Allowed EC2 types (list) |
-| `node_capacity_type` | `SPOT` or `ON_DEMAND` |
-| `node_min_size` / `node_desired_size` / `node_max_size` | Scaling boundaries |
-| `node_max_unavailable` | Rolling upgrade disruption control |
-| `node_labels` | Workload classification | 
+
+| Variable                                                | Purpose                            |
+| ------------------------------------------------------- | ---------------------------------- |
+| `node_group_name`                                       | Node group identifier              |
+| `node_instance_types`                                   | Allowed EC2 types (list)           |
+| `node_capacity_type`                                    | `SPOT` or `ON_DEMAND`              |
+| `node_min_size` / `node_desired_size` / `node_max_size` | Scaling boundaries                 |
+| `node_max_unavailable`                                  | Rolling upgrade disruption control |
+| `node_labels`                                           | Workload classification            |
 
 Lifecycle: `desired_size` ignored → facilitates external autoscaler.
 
 ## 🏃 Execution Flow
+
 ```bash
 # 1. Bootstrap (one-time)
 cd terraform/bootstrap
@@ -167,9 +184,11 @@ cd ../eks
 terraform init -backend-config=backend.hcl
 terraform apply
 ```
+
 Approx durations: Cluster ~7m, Node group ~5–6m.
 
 Sample outputs:
+
 ```text
 cluster_name     = cloudinsight-dev-staging
 cluster_version  = 1.33
@@ -178,24 +197,27 @@ cluster_arn      = arn:aws:eks:eu-west-1:...:cluster/cloudinsight-dev-staging
 ```
 
 ## 🔑 Post-Provision Access
+
 ```bash
 aws eks update-kubeconfig --name cloudinsight-dev-staging --region eu-west-1
 kubectl get nodes
 ```
 
 ## 🧪 Design Decisions
-| Choice | Rationale |
-|--------|-----------|
+
+| Choice                | Rationale                                 |
+| --------------------- | ----------------------------------------- |
 | Split state per stack | Minimize blast radius & clarify ownership |
-| Single `dev-staging` | Speed over early duplication |
-| Single NAT | Cost-lean; can scale later to per-AZ |
-| Inline route tables | Avoid premature abstraction |
-| Public endpoint first | Simplifies bootstrap; harden later |
-| Spot capacity | Immediate cost savings |
-| Param node group | Reusable multi-pool future |
-| Discovery tags | Enable LB + cluster provisioning |
+| Single `dev-staging`  | Speed over early duplication              |
+| Single NAT            | Cost-lean; can scale later to per-AZ      |
+| Inline route tables   | Avoid premature abstraction               |
+| Public endpoint first | Simplifies bootstrap; harden later        |
+| Spot capacity         | Immediate cost savings                    |
+| Param node group      | Reusable multi-pool future                |
+| Discovery tags        | Enable LB + cluster provisioning          |
 
 ## 🚀 Future Enhancements
+
 1. OIDC provider + IRSA roles
 2. Control plane logging (API, audit, authenticator)
 3. Restrict public access (CIDRs) + enable private endpoint
@@ -208,24 +230,27 @@ kubectl get nodes
 10. Policy-as-code (OPA / Conftest) in CI
 
 ## 🛠 Operational Guidelines
-| Action | Guidance |
-|--------|----------|
-| Scale nodes | Adjust vars or rely on autoscaler (future) |
-| Upgrade cluster | Bump version → apply → roll nodes |
-| Add labels | Edit `node_labels` → apply |
-| Switch capacity type | Node group recreation likely |
-| Add subnets | Update VPC → apply networking before EKS |
+
+| Action               | Guidance                                   |
+| -------------------- | ------------------------------------------ |
+| Scale nodes          | Adjust vars or rely on autoscaler (future) |
+| Upgrade cluster      | Bump version → apply → roll nodes          |
+| Add labels           | Edit `node_labels` → apply                 |
+| Switch capacity type | Node group recreation likely               |
+| Add subnets          | Update VPC → apply networking before EKS   |
 
 ## ⚠ Risks & Mitigations
-| Risk | Mitigation |
-|------|------------|
-| Single NAT SPOF | Add per-AZ NAT gateways when HA needed |
-| Public API exposed | Restrict CIDRs + enable private endpoint |
-| Spot interruptions | Add on-demand system pool |
-| Broad node IAM perms | Transition controllers to IRSA |
-| Drift from manual tweaks | Enforce PR + CI plan gates |
+
+| Risk                     | Mitigation                               |
+| ------------------------ | ---------------------------------------- |
+| Single NAT SPOF          | Add per-AZ NAT gateways when HA needed   |
+| Public API exposed       | Restrict CIDRs + enable private endpoint |
+| Spot interruptions       | Add on-demand system pool                |
+| Broad node IAM perms     | Transition controllers to IRSA           |
+| Drift from manual tweaks | Enforce PR + CI plan gates               |
 
 ## 🧾 Example `terraform.tfvars` (EKS)
+
 ```hcl
 project_name        = "cloudinsight"
 environment         = "dev-staging"
@@ -251,15 +276,17 @@ tags = {
 ```
 
 ## ✅ Quality Gates Summary
-| Gate | Result |
-|------|--------|
-| Format | Passed |
-| Validate | Passed |
-| Plan | Expected creates only |
-| Apply | Successful |
+
+| Gate              | Result                                                 |
+| ----------------- | ------------------------------------------------------ |
+| Format            | Passed                                                 |
+| Validate          | Passed                                                 |
+| Plan              | Expected creates only                                  |
+| Apply             | Successful                                             |
 | Deprecated params | Removed `dynamodb_table` from remote state data source |
 
 ## ⚡ Quick Start
+
 1. Bootstrap remote state
 2. Apply networking stack
 3. Apply EKS stack
@@ -267,6 +294,7 @@ tags = {
 5. Layer operational addons (future)
 
 ## 🗺 Next Actions
+
 - Implement IRSA + Autoscaler
 - Enable control plane logs
 - Introduce private API endpoint & CIDR restrictions
@@ -274,6 +302,7 @@ tags = {
 - Add CI policy & security scanning
 
 ---
+
 <div align="center">
 <sub>Maintained by the CloudInsight DevOps Team • Infrastructure as Code, done right.</sub>
 </div>
