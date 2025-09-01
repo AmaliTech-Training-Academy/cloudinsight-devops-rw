@@ -1,13 +1,3 @@
-terraform {
-  required_version = ">= 1.6.0"
-  required_providers {
-    aws = {
-      source  = "hashicorp/aws"
-      version = "~> 5.0"
-    }
-  }
-}
-
 resource "aws_vpc" "this" {
   cidr_block           = var.cidr_block
   enable_dns_hostnames = true
@@ -23,10 +13,15 @@ resource "aws_subnet" "public" {
   cidr_block              = each.value.cidr
   availability_zone       = each.value.az
   map_public_ip_on_launch = true
-  tags = merge(var.tags, {
-    Name = "${var.project_name}-${var.environment}-public-${each.key}"
-    Tier = "public"
-  })
+  tags = merge(
+    var.tags,
+    {
+      Name                                        = "${var.project_name}-${var.environment}-public-${each.key}"
+      Tier                                        = "public"
+      "kubernetes.io/cluster/${var.cluster_name}" = var.cluster_ownership
+      "kubernetes.io/role/elb"                    = "1"
+    }
+  )
 }
 
 resource "aws_subnet" "private" {
@@ -34,10 +29,15 @@ resource "aws_subnet" "private" {
   vpc_id            = aws_vpc.this.id
   cidr_block        = each.value.cidr
   availability_zone = each.value.az
-  tags = merge(var.tags, {
-    Name = "${var.project_name}-${var.environment}-private-${each.key}"
-    Tier = "private"
-  })
+  tags = merge(
+    var.tags,
+    {
+      Name                                        = "${var.project_name}-${var.environment}-private-${each.key}"
+      Tier                                        = "private"
+      "kubernetes.io/cluster/${var.cluster_name}" = var.cluster_ownership
+      "kubernetes.io/role/internal-elb"           = "1"
+    }
+  )
 }
 
 output "vpc_id" {

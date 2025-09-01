@@ -5,10 +5,6 @@ terraform {
       source  = "hashicorp/aws"
       version = "~> 5.0"
     }
-    random = {
-      source  = "hashicorp/random"
-      version = "~> 3.6"
-    }
   }
 }
 
@@ -19,6 +15,13 @@ provider "aws" {
 locals {
   bucket_name = var.backend_bucket_name
   table_name  = var.lock_table_name
+  cost_center = "${var.backend_bucket_name}-bootstrap"
+  common_tags = {
+    Project     = var.backend_bucket_name
+    Environment = "bootstrap"
+    CostCenter  = local.cost_center
+    ManagedBy   = "terraform"
+  }
 }
 
 resource "aws_s3_bucket" "tf_state" {
@@ -26,6 +29,7 @@ resource "aws_s3_bucket" "tf_state" {
   lifecycle {
     prevent_destroy = true
   }
+  tags = local.common_tags
 }
 
 resource "aws_s3_bucket_versioning" "tf_state" {
@@ -48,7 +52,7 @@ resource "aws_dynamodb_table" "tf_locks" {
   name         = local.table_name
   billing_mode = "PAY_PER_REQUEST"
   hash_key     = "LockID"
-
+  tags         = local.common_tags
   attribute {
     name = "LockID"
     type = "S"

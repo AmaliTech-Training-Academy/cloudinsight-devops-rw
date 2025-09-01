@@ -22,3 +22,13 @@ variable "tags" {
   type        = map(string)
   description = "Additional tags"
 }
+
+variable "cluster_name" {
+  type        = string
+  description = "EKS cluster name for subnet tagging (kubernetes.io/cluster/...)"
+}
+
+variable "cluster_ownership" {
+  type        = string
+  description = "Value for kubernetes.io/cluster/<name> tag (owned or shared)"
+}

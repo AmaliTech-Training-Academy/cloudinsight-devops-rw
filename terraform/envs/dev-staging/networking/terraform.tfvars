@@ -2,7 +2,9 @@ environment  = "dev-staging"
 project_name = "cloudinsight"
 region       = "eu-west-1"
 tags = {
-  Owner      = "platform-team"
+  Owner      = "team-alpha"
   Stage      = "dev-staging"
-  CostCenter = "shared-dev"
 }
+
+cluster_name      = "cloudinsight-dev-staging-eks"
+cluster_ownership = "owned"
