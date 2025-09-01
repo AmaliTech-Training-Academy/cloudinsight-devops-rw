@@ -1,0 +1,14 @@
+variable "project_name" { type = string }
+variable "environment" { type = string }
+variable "cluster_version" { type = string }
+variable "private_subnet_ids" { type = list(string) }
+variable "tags" { type = map(string) }
+
+variable "node_group_name" { type = string }
+variable "node_instance_types" { type = list(string) }
+variable "node_capacity_type" { type = string }
+variable "node_min_size" { type = number }
+variable "node_desired_size" { type = number }
+variable "node_max_size" { type = number }
+variable "node_max_unavailable" { type = number }
+variable "node_labels" { type = map(string) }
