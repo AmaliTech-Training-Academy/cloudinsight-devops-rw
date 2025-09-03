@@ -11,6 +11,7 @@ set -euo pipefail
 
 APPLY_ORDER=(
   networking
+  ecr
   eks
   metrics-server
   pod-identity-agent 
