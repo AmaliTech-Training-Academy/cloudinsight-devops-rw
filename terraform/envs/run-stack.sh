@@ -20,6 +20,7 @@ APPLY_ORDER=(
   ingress-nginx
   cert-manager
   argocd
+  argocd-image-updater
 )
 
 COLOR() { # usage: COLOR red "text"

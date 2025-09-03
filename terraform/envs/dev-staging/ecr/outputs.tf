@@ -3,9 +3,9 @@ output "ecr_repository_urls" {
   value       = module.ecr.repository_urls
 }
 
-output "ecr_repository_arns" {
-  description = "Map of ECR repository names to their ARNs"
-  value       = module.ecr.repository_arns
+output "ecr_registry_info" {
+  description = "ECR registry information for ArgoCD Image Updater"
+  value       = module.ecr.registry_info
 }
 
 output "frontend_repositories" {
