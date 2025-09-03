@@ -131,6 +131,32 @@ if [[ "$ACTION" == "create" ]]; then
       run_for_dir "$d" plan
     else
       run_for_dir "$d" apply
+      # Update kubeconfig after EKS cluster creation
+      if [[ "$d" == "eks" ]]; then
+        log "Waiting for EKS cluster to become active..."
+        local max_attempts=30
+        local attempt=1
+        while [[ $attempt -le $max_attempts ]]; do
+          local cluster_status=$(aws eks describe-cluster --name cloudinsight-dev-staging --region eu-west-1 --query 'cluster.status' --output text 2>/dev/null || echo "ERROR")
+          if [[ "$cluster_status" == "ACTIVE" ]]; then
+            log "EKS cluster is active, updating kubeconfig"
+            aws eks update-kubeconfig --name cloudinsight-dev-staging --region eu-west-1 || warn "Failed to update kubeconfig"
+            break
+          elif [[ "$cluster_status" == "ERROR" ]]; then
+            warn "Failed to check cluster status, attempting kubeconfig update anyway"
+            aws eks update-kubeconfig --name cloudinsight-dev-staging --region eu-west-1 || warn "Failed to update kubeconfig"
+            break
+          else
+            log "EKS cluster status: $cluster_status (attempt $attempt/$max_attempts)"
+            sleep 30
+            ((attempt++))
+          fi
+        done
+        if [[ $attempt -gt $max_attempts ]]; then
+          warn "EKS cluster did not become active within expected time, but continuing deployment"
+          aws eks update-kubeconfig --name cloudinsight-dev-staging --region eu-west-1 || warn "Failed to update kubeconfig"
+        fi
+      fi
     fi
   done
   log "Create sequence finished"
