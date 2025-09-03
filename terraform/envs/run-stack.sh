@@ -19,6 +19,7 @@ APPLY_ORDER=(
   aws-load-balancer-controller
   ingress-nginx
   cert-manager
+  argocd
 )
 
 COLOR() { # usage: COLOR red "text"
