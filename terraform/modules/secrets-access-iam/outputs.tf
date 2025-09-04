@@ -34,3 +34,15 @@ output "account_info" {
     region     = data.aws_region.current.name
   }
 }
+
+# Output shared infra role ARN (when created)
+output "shared_infra_role_arn" {
+  description = "ARN of the shared infra role for Pod Identity association"
+  value       = var.create_shared_infra_role ? aws_iam_role.shared_infra_secrets_access[0].arn : null
+}
+
+# Output shared infra role name (when created)
+output "shared_infra_role_name" {
+  description = "Name of the shared infra role"
+  value       = var.create_shared_infra_role ? aws_iam_role.shared_infra_secrets_access[0].name : null
+}

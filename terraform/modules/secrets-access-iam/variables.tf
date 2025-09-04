@@ -37,3 +37,21 @@ variable "tags" {
   type        = map(string)
   default     = {}
 }
+
+variable "create_shared_infra_role" {
+  description = "Whether to create a shared IAM role for infra services"
+  type        = bool
+  default     = false
+}
+
+variable "shared_infra_services" {
+  description = "List of shared infra service names for combined secret access"
+  type        = list(string)
+  default     = []
+}
+
+variable "environment" {
+  description = "Environment name for secret paths"
+  type        = string
+  default     = "dev"
+}

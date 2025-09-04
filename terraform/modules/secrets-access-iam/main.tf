@@ -24,7 +24,10 @@ resource "aws_iam_role" "secrets_access" {
         Principal = {
           Service = "pods.eks.amazonaws.com"
         }
-        Action = "sts:AssumeRole"
+        Action = [
+          "sts:AssumeRole",
+          "sts:TagSession"
+        ]
         Condition = {
           StringEquals = {
             "aws:SourceAccount" = data.aws_caller_identity.current.account_id
@@ -88,4 +91,84 @@ resource "aws_iam_role_policy_attachment" "secrets_access" {
 
   role       = aws_iam_role.secrets_access[each.key].name
   policy_arn = aws_iam_policy.secrets_access[each.key].arn
+}
+
+# ========================================
+# SHARED INFRA SERVICES ROLE
+# Creates a single role for shared services (api-gateway, config-server, service-discovery)
+# that can access all their secrets
+# ========================================
+
+# Shared infra role
+resource "aws_iam_role" "shared_infra_secrets_access" {
+  count = var.create_shared_infra_role ? 1 : 0
+
+  name = "eks-${var.cluster_name}-shared-infra-secrets-role"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Principal = {
+          Service = "pods.eks.amazonaws.com"
+        }
+        Action = [
+          "sts:AssumeRole",
+          "sts:TagSession"
+        ]
+        Condition = {
+          StringEquals = {
+            "aws:SourceAccount" = data.aws_caller_identity.current.account_id
+          }
+          ArnEquals = {
+            "aws:SourceArn" = "arn:aws:eks:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:cluster/${var.cluster_name}"
+          }
+        }
+      }
+    ]
+  })
+
+  tags = merge(var.tags, {
+    Name = "eks-${var.cluster_name}-shared-infra-secrets-role"
+    Type = "SharedInfraSecretsRole"
+  })
+}
+
+# Policy for shared infra role to access all shared services' secrets
+resource "aws_iam_policy" "shared_infra_secrets_access" {
+  count = var.create_shared_infra_role ? 1 : 0
+
+  name        = "eks-${var.cluster_name}-shared-infra-secrets-policy"
+  description = "Policy for shared infra services to access their secrets"
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "secretsmanager:GetSecretValue",
+          "secretsmanager:DescribeSecret"
+        ]
+        Resource = [
+          for service_name in var.shared_infra_services :
+          "arn:aws:secretsmanager:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:secret:${var.environment}/${service_name}/*"
+        ]
+      }
+    ]
+  })
+
+  tags = merge(var.tags, {
+    Name = "eks-${var.cluster_name}-shared-infra-secrets-policy"
+    Type = "SharedInfraSecretsPolicy"
+  })
+}
+
+# Attach policy to shared infra role
+resource "aws_iam_role_policy_attachment" "shared_infra_secrets_access" {
+  count = var.create_shared_infra_role ? 1 : 0
+
+  role       = aws_iam_role.shared_infra_secrets_access[0].name
+  policy_arn = aws_iam_policy.shared_infra_secrets_access[0].arn
 }

@@ -25,3 +25,15 @@ output "account_info" {
   description = "AWS account and region information"
   value       = module.secrets_access_iam.account_info
 }
+
+# Output shared infra role ARN
+output "shared_infra_role_arn" {
+  description = "ARN of the shared infra role for Pod Identity association"
+  value       = module.secrets_access_iam.shared_infra_role_arn
+}
+
+# Output shared infra role name
+output "shared_infra_role_name" {
+  description = "Name of the shared infra role"
+  value       = module.secrets_access_iam.shared_infra_role_name
+}

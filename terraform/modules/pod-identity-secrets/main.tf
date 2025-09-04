@@ -6,7 +6,7 @@
 # Create Pod Identity associations for all microservices
 resource "aws_eks_pod_identity_association" "microservices" {
   for_each = {
-    for svc in var.microservices : "${svc.namespace}-${svc.service_account}" => svc
+    for svc in var.microservices : svc.name => svc
   }
 
   cluster_name    = var.cluster_name

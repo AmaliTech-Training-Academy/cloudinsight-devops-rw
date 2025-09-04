@@ -20,5 +20,11 @@ module "secrets_access_iam" {
 
   cluster_name = data.terraform_remote_state.eks.outputs.cluster_name
   services     = var.services
-  tags         = var.tags
+
+  # Create shared infra role for api-gateway, config-server, service-discovery
+  create_shared_infra_role = true
+  shared_infra_services    = ["api-gateway", "config-server", "service-discovery"]
+  environment              = var.environment
+
+  tags = var.tags
 }

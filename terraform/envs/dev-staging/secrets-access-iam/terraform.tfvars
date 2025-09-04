@@ -10,18 +10,6 @@ services = [
     secret_name = "frontend"
   },
   {
-    name        = "api-gateway"
-    secret_name = "api-gateway"
-  },
-  {
-    name        = "config-server"
-    secret_name = "config-server"
-  },
-  {
-    name        = "service-discovery"
-    secret_name = "service-discovery"
-  },
-  {
     name        = "user-service"
     secret_name = "user-service"
   },
