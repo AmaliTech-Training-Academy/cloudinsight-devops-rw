@@ -1,17 +1,21 @@
 # ========================================
 # SECRETS ACCESS IAM MODULE
-# Creates IAM roles and policies for secrets access
+# Creates IAM roles for microservices to access AWS Secrets Manager
+# Each service gets its own role with access only to its specific secrets
 # ========================================
 
-# Data source to get current AWS account ID and region
+# Data source for current AWS account
 data "aws_caller_identity" "current" {}
 data "aws_region" "current" {}
 
-# IAM Role for Pod Identity (replaces IRSA)
+# Create IAM role for each service
 resource "aws_iam_role" "secrets_access" {
-  name = "${var.cluster_name}-secrets-access"
+  for_each = {
+    for svc in var.services : svc.name => svc
+  }
 
-  # Pod Identity assume role policy
+  name = "eks-${var.cluster_name}-${each.value.name}-secrets-role"
+
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
     Statement = [
@@ -20,25 +24,36 @@ resource "aws_iam_role" "secrets_access" {
         Principal = {
           Service = "pods.eks.amazonaws.com"
         }
-        Action = [
-          "sts:AssumeRole",
-          "sts:TagSession"
-        ]
+        Action = "sts:AssumeRole"
+        Condition = {
+          StringEquals = {
+            "aws:SourceAccount" = data.aws_caller_identity.current.account_id
+          }
+          ArnEquals = {
+            "aws:SourceArn" = "arn:aws:eks:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:cluster/${var.cluster_name}"
+          }
+        }
       }
     ]
   })
 
   tags = merge(var.tags, {
-    Name      = "${var.cluster_name}-secrets-access"
-    Purpose   = "EKS Pod Identity for Secrets Manager access"
-    ManagedBy = "Terraform"
+    Name        = "eks-${var.cluster_name}-${each.value.name}-secrets-role"
+    Service     = each.value.name
+    ClusterName = var.cluster_name
+    Purpose     = "Secrets Manager access for ${each.value.name}"
+    ManagedBy   = "Terraform"
   })
 }
 
-# IAM Policy for accessing AWS Secrets Manager
+# Create IAM policy for each service with access to their specific secrets
 resource "aws_iam_policy" "secrets_access" {
-  name        = "${var.cluster_name}-secrets-access"
-  description = "Policy for accessing AWS Secrets Manager via Pod Identity"
+  for_each = {
+    for svc in var.services : svc.name => svc
+  }
+
+  name        = "eks-${var.cluster_name}-${each.value.name}-secrets-policy"
+  description = "Policy for ${each.value.name} to access specific secrets in AWS Secrets Manager"
 
   policy = jsonencode({
     Version = "2012-10-17"
@@ -49,20 +64,28 @@ resource "aws_iam_policy" "secrets_access" {
           "secretsmanager:GetSecretValue",
           "secretsmanager:DescribeSecret"
         ]
-        Resource = var.allowed_secret_patterns
+        Resource = [
+          "arn:aws:secretsmanager:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:secret:${each.value.secret_name}*"
+        ]
       }
     ]
   })
 
   tags = merge(var.tags, {
-    Name      = "${var.cluster_name}-secrets-access-policy"
-    Purpose   = "Secrets Manager access for EKS pods"
-    ManagedBy = "Terraform"
+    Name        = "eks-${var.cluster_name}-${each.value.name}-secrets-policy"
+    Service     = each.value.name
+    ClusterName = var.cluster_name
+    Purpose     = "Secrets access policy for ${each.value.name}"
+    ManagedBy   = "Terraform"
   })
 }
 
-# Attach the policy to the role
+# Attach policy to role for each service
 resource "aws_iam_role_policy_attachment" "secrets_access" {
-  policy_arn = aws_iam_policy.secrets_access.arn
-  role       = aws_iam_role.secrets_access.name
+  for_each = {
+    for svc in var.services : svc.name => svc
+  }
+
+  role       = aws_iam_role.secrets_access[each.key].name
+  policy_arn = aws_iam_policy.secrets_access[each.key].arn
 }

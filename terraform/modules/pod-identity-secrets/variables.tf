@@ -7,17 +7,13 @@ variable "cluster_name" {
   type        = string
 }
 
-variable "secrets_role_arn" {
-  description = "ARN of the IAM role for secrets access (from secrets-access-iam module)"
-  type        = string
-}
-
 variable "microservices" {
-  description = "List of microservices with their namespace and service account"
+  description = "List of microservices with their namespace, service account, and IAM role ARN"
   type = list(object({
     name            = string
     namespace       = string
     service_account = string
+    role_arn        = string # Service-specific IAM role ARN
   }))
 
   validation {

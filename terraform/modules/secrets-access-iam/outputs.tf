@@ -2,31 +2,31 @@
 # OUTPUTS FOR SECRETS ACCESS IAM MODULE
 # ========================================
 
-output "role_arn" {
-  description = "ARN of the IAM role for secrets access"
-  value       = aws_iam_role.secrets_access.arn
+# Output map of service names to their IAM role ARNs
+output "service_role_arns" {
+  description = "Map of service names to their IAM role ARNs for Pod Identity associations"
+  value = {
+    for svc_name, role in aws_iam_role.secrets_access : svc_name => role.arn
+  }
 }
 
-output "role_name" {
-  description = "Name of the IAM role for secrets access"
-  value       = aws_iam_role.secrets_access.name
+# Output map of service names to their IAM role names
+output "service_role_names" {
+  description = "Map of service names to their IAM role names"
+  value = {
+    for svc_name, role in aws_iam_role.secrets_access : svc_name => role.name
+  }
 }
 
-output "policy_arn" {
-  description = "ARN of the IAM policy for secrets access"
-  value       = aws_iam_policy.secrets_access.arn
+# Output map of service names to their policy ARNs
+output "service_policy_arns" {
+  description = "Map of service names to their IAM policy ARNs"
+  value = {
+    for svc_name, policy in aws_iam_policy.secrets_access : svc_name => policy.arn
+  }
 }
 
-output "policy_name" {
-  description = "Name of the IAM policy for secrets access"
-  value       = aws_iam_policy.secrets_access.name
-}
-
-output "allowed_secrets" {
-  description = "Secret patterns this role can access"
-  value       = var.allowed_secret_patterns
-}
-
+# Output AWS account information
 output "account_info" {
   description = "AWS account and region information"
   value = {

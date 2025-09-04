@@ -23,7 +23,7 @@ output "microservices_summary" {
       namespace        = svc.namespace
       service_account  = svc.service_account
       pod_identity_key = "${svc.namespace}-${svc.service_account}"
-      secrets_role_arn = var.secrets_role_arn
+      secrets_role_arn = svc.role_arn
     }
   }
 }

@@ -7,14 +7,16 @@ variable "cluster_name" {
   type        = string
 }
 
-variable "allowed_secret_patterns" {
-  description = "List of secret ARN patterns that pods can access"
-  type        = list(string)
-  default     = ["*"]
+variable "services" {
+  description = "List of services with their secret access requirements"
+  type = list(object({
+    name        = string # Service name (e.g., "frontend", "user-service")
+    secret_name = string # Single secret name this service can access
+  }))
 
   validation {
-    condition     = length(var.allowed_secret_patterns) > 0
-    error_message = "At least one secret pattern must be specified."
+    condition     = length(var.services) > 0
+    error_message = "At least one service must be specified."
   }
 }
 
