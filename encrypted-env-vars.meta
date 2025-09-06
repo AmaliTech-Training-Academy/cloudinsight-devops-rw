@@ -1,0 +1,7 @@
+encrypted_at: "2024-09-06T21:00:00Z"
+encrypted_by: "ci-setup"
+encryption_method: "RSA-4096 + AES-256-CBC"
+original_hash: "abc123def456"
+hash: "abc123def456"
+file_size: 256
+description: "Sample encrypted environment variables for CI/CD testing"

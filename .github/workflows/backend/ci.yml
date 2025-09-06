@@ -1,0 +1,349 @@
+name: Backend CI/CD Pipeline
+
+permissions:
+  contents: write    # For creating tags and releases
+  checks: write      # For test annotations
+  actions: read      # For workflow operations
+  id-token: write    # For OIDC if needed
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'backend/**'
+      - '.github/workflows/backend/**'
+  push:
+    branches: [main]
+    paths:
+      - 'backend/**'
+      - '.github/workflows/backend/**'
+
+env:
+  AWS_REGION: ${{ secrets.AWS_REGION }}
+  ECR_REPOSITORY: ${{ secrets.ECR_REPOSITORY_BACKEND }}
+  AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
+
+jobs:
+  test:
+    name: Test and Build
+    runs-on: ubuntu-latest
+    outputs:
+      new-tag: ${{ steps.semantic-tag.outputs.new-tag }}
+      should-deploy: ${{ steps.semantic-tag.outputs.should-deploy }}
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Required for semantic versioning
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+          cache: 'maven'
+
+      - name: Check for Java source files
+        id: check-java
+        run: |
+          # Check if there are any Java files in the repository
+          JAVA_FILES=$(find . -name "*.java" -type f | head -5)
+
+          if [ -z "$JAVA_FILES" ]; then
+            echo "⚠️ No Java source files found in repository"
+            echo "✅ Skipping Java build steps - repository not yet initialized with Java code"
+            echo "has_java=false" >> $GITHUB_OUTPUT
+          else
+            echo "☕ Java source files found:"
+            echo "$JAVA_FILES"
+            echo "✅ Proceeding with Java build pipeline"
+            echo "has_java=true" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Run unit tests with JaCoCo
+        if: steps.check-java.outputs.has_java == 'true'
+        run: |
+          set -e
+          # Run tests + generate JaCoCo report without modifying pom.xml by invoking plugin directly
+          mvn -B -q org.jacoco:jacoco-maven-plugin:prepare-agent test org.jacoco:jacoco-maven-plugin:report
+          # Ensure report exists
+          if [ ! -f target/site/jacoco/jacoco.xml ]; then echo "JaCoCo report missing"; exit 1; fi
+
+      - name: Run linting
+        if: steps.check-java.outputs.has_java == 'true'
+        run: |
+          # Add linting step if available
+          if [ -f "pom.xml" ] && grep -q "spotbugs\|checkstyle\|pmd" pom.xml; then
+            echo "Running code quality checks..."
+            mvn -B spotbugs:check checkstyle:check || true
+          else
+            echo "No linting configuration found, skipping"
+          fi
+
+      - name: Build application
+        if: steps.check-java.outputs.has_java == 'true'
+        run: |
+          mvn -B clean compile
+
+      - name: Generate semantic version tag
+        id: semantic-tag
+        run: |
+          # Get the latest tag
+          LATEST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "v0.0.0")
+          echo "Latest tag: $LATEST_TAG"
+          
+          # Extract version parts
+          VERSION=${LATEST_TAG#v}
+          IFS='.' read -ra VERSION_PARTS <<< "$VERSION"
+          MAJOR=${VERSION_PARTS[0]:-0}
+          MINOR=${VERSION_PARTS[1]:-0}
+          PATCH=${VERSION_PARTS[2]:-0}
+          
+          # Analyze commits since last tag
+          if [ "$LATEST_TAG" = "v0.0.0" ]; then
+            COMMITS=$(git log --oneline)
+          else
+            COMMITS=$(git log ${LATEST_TAG}..HEAD --oneline)
+          fi
+          
+          echo "Commits to analyze:"
+          echo "$COMMITS"
+          
+          # Check for conventional commit types
+          HAS_FEAT=false
+          HAS_FIX=false
+          HAS_BREAKING=false
+          HAS_VALID_COMMIT=false
+          
+          while IFS= read -r commit; do
+            if [[ $commit =~ ^[a-f0-9]+[[:space:]]+(feat|fix|docs|style|refactor|test|chore)(\(.+\))?!?:[[:space:]].+ ]]; then
+              HAS_VALID_COMMIT=true
+              if [[ $commit =~ feat ]]; then
+                HAS_FEAT=true
+              elif [[ $commit =~ fix ]]; then
+                HAS_FIX=true
+              fi
+              
+              # Check for breaking changes (! after type/scope)
+              if [[ $commit =~ (feat|fix|docs|style|refactor|test|chore)(\(.+\))?! ]] && [ $MAJOR -eq 0 ]; then
+                echo "Error: Breaking change indicator '!' found in commit but version is 0.x.x"
+                echo "Breaking changes are not allowed in version 0.x.x"
+                exit 1
+              elif [[ $commit =~ (feat|fix|docs|style|refactor|test|chore)(\(.+\))?! ]]; then
+                HAS_BREAKING=true
+              fi
+            fi
+          done <<< "$COMMITS"
+          
+          # Only proceed if we're on main branch and have valid commits
+          if [ "${{ github.ref }}" != "refs/heads/main" ] || [ "$HAS_VALID_COMMIT" != "true" ]; then
+            echo "should-deploy=false" >> $GITHUB_OUTPUT
+            echo "new-tag=" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          
+          # Calculate new version
+          if [ "$HAS_BREAKING" = "true" ]; then
+            MAJOR=$((MAJOR + 1))
+            MINOR=0
+            PATCH=0
+          elif [ "$HAS_FEAT" = "true" ]; then
+            MINOR=$((MINOR + 1))
+            PATCH=0
+          elif [ "$HAS_FIX" = "true" ] || [ "$HAS_VALID_COMMIT" = "true" ]; then
+            PATCH=$((PATCH + 1))
+          fi
+          
+          # Handle initial version
+          if [ "$LATEST_TAG" = "v0.0.0" ]; then
+            NEW_TAG="v0.1.0"
+          else
+            NEW_TAG="v${MAJOR}.${MINOR}.${PATCH}"
+          fi
+          
+          echo "New tag: $NEW_TAG"
+          echo "should-deploy=true" >> $GITHUB_OUTPUT
+          echo "new-tag=$NEW_TAG" >> $GITHUB_OUTPUT
+
+  deploy-secrets:
+    name: Deploy Secrets to AWS
+    runs-on: ubuntu-latest
+    needs: test
+    if: github.ref == 'refs/heads/main' && needs.test.outputs.should-deploy == 'true'
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Decrypt environment variables
+        run: |
+          # Create temporary directory for decryption
+          mkdir -p /tmp/decrypted
+          
+          # Decrypt the AES key using the team private key
+          echo "${{ secrets.TEAM_PRIVATE_KEY }}" > /tmp/private_key.pem
+          openssl rsautl -decrypt -inkey /tmp/private_key.pem -in encrypted-aes-key.enc -out /tmp/aes_key.bin
+          
+          # Decrypt the environment variables
+          openssl enc -aes-256-cbc -d -in encrypted-env-vars.enc -out /tmp/decrypted/env-vars.txt -pass file:/tmp/aes_key.bin
+          
+          # Verify integrity using hash from metadata
+          if [ -f "encrypted-env-vars.meta" ]; then
+            EXPECTED_HASH=$(grep "hash:" encrypted-env-vars.meta | cut -d':' -f2 | tr -d ' "')
+            ACTUAL_HASH=$(sha256sum /tmp/decrypted/env-vars.txt | cut -d' ' -f1)
+            
+            if [ -n "$EXPECTED_HASH" ] && [ "$EXPECTED_HASH" != "$ACTUAL_HASH" ]; then
+              echo "Error: Hash verification failed!"
+              echo "Expected: $EXPECTED_HASH"
+              echo "Actual: $ACTUAL_HASH"
+              exit 1
+            fi
+            
+            echo "Hash verification passed"
+          else
+            echo "Warning: No metadata file found for hash verification"
+          fi
+          
+          # Clean up sensitive files
+          rm -f /tmp/private_key.pem /tmp/aes_key.bin
+
+      - name: Deploy secrets to AWS Secrets Manager
+        run: |
+          # Convert env file to JSON format for AWS Secrets Manager
+          python3 << 'EOF'
+          import json
+          import os
+          
+          secrets_dict = {}
+          with open('/tmp/decrypted/env-vars.txt', 'r') as f:
+              for line in f:
+                  line = line.strip()
+                  if line and not line.startswith('#') and '=' in line:
+                      key, value = line.split('=', 1)
+                      # Remove quotes if present
+                      value = value.strip('"').strip("'")
+                      secrets_dict[key] = value
+          
+          # Write to JSON file
+          with open('/tmp/secrets.json', 'w') as f:
+              json.dump(secrets_dict, f)
+          
+          print(f"Converted {len(secrets_dict)} environment variables to JSON")
+          EOF
+          
+          # Update or create the secret in AWS Secrets Manager
+          SECRET_NAME="${{ secrets.AWS_SECRETS_MANAGER_SECRET_NAME_BACKEND }}"
+          
+          # Check if secret exists
+          if aws secretsmanager describe-secret --secret-id "$SECRET_NAME" > /dev/null 2>&1; then
+            echo "Updating existing secret: $SECRET_NAME"
+            aws secretsmanager update-secret \
+              --secret-id "$SECRET_NAME" \
+              --secret-string file:///tmp/secrets.json \
+              --description "Backend environment variables - Updated by CI/CD pipeline"
+          else
+            echo "Creating new secret: $SECRET_NAME"
+            aws secretsmanager create-secret \
+              --name "$SECRET_NAME" \
+              --secret-string file:///tmp/secrets.json \
+              --description "Backend environment variables - Created by CI/CD pipeline"
+          fi
+          
+          # Add tags to the secret
+          aws secretsmanager tag-resource \
+            --secret-id "$SECRET_NAME" \
+            --tags '[
+              {"Key": "Environment", "Value": "production"},
+              {"Key": "Service", "Value": "backend"},
+              {"Key": "ManagedBy", "Value": "github-actions"},
+              {"Key": "Version", "Value": "${{ needs.test.outputs.new-tag }}"}
+            ]'
+          
+          echo "Successfully deployed secrets to AWS Secrets Manager"
+          
+          # Clean up temporary files
+          rm -f /tmp/decrypted/env-vars.txt /tmp/secrets.json
+
+  build-and-push:
+    name: Build and Push to ECR
+    runs-on: ubuntu-latest
+    needs: [test, deploy-secrets]
+    if: github.ref == 'refs/heads/main' && needs.test.outputs.should-deploy == 'true'
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build, tag, and push image to Amazon ECR
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG: ${{ needs.test.outputs.new-tag }}
+        run: |
+          # Check if we have backend directory or if we're in backend context
+          if [ -d "backend" ]; then
+            cd backend
+          fi
+          
+          # Build the Docker image
+          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
+          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:latest .
+          
+          # Push the image to ECR
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
+          
+          echo "Image pushed successfully:"
+          echo "  $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
+          echo "  $ECR_REGISTRY/$ECR_REPOSITORY:latest"
+
+      - name: Create and push git tag
+        if: needs.test.outputs.new-tag != ''
+        run: |
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          
+          TAG_NAME="${{ needs.test.outputs.new-tag }}"
+          git tag -a $TAG_NAME -m "Release $TAG_NAME - Backend"
+          git push origin $TAG_NAME
+          
+          echo "Created and pushed tag: $TAG_NAME"
+
+      - name: Create GitHub Release
+        if: needs.test.outputs.new-tag != ''
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ needs.test.outputs.new-tag }}
+          release_name: Backend Release ${{ needs.test.outputs.new-tag }}
+          body: |
+            ## Backend Release ${{ needs.test.outputs.new-tag }}
+            
+            ### Changes
+            - Automated release based on conventional commits
+            - Docker image: `${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ needs.test.outputs.new-tag }}`
+            - Environment variables updated in AWS Secrets Manager
+            
+            ### Commit Range
+            View changes: https://github.com/${{ github.repository }}/compare/${{ needs.test.outputs.new-tag }}
+          draft: false
+          prerelease: ${{ startsWith(needs.test.outputs.new-tag, 'v0.') }}

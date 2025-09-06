@@ -1,0 +1,389 @@
+name: Frontend CI/CD Pipeline
+
+permissions:
+  contents: write    # For creating tags and releases
+  checks: write      # For test annotations
+  actions: read      # For workflow operations
+  id-token: write    # For OIDC if needed
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'frontend/**'
+      - '.github/workflows/frontend/**'
+  push:
+    branches: [main]
+    paths:
+      - 'frontend/**'
+      - '.github/workflows/frontend/**'
+
+env:
+  AWS_REGION: ${{ secrets.AWS_REGION }}
+  ECR_REPOSITORY: ${{ secrets.ECR_REPOSITORY_FRONTEND }}
+  AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
+
+jobs:
+  test:
+    name: Test and Build
+    runs-on: ubuntu-latest
+    outputs:
+      new-tag: ${{ steps.semantic-tag.outputs.new-tag }}
+      should-deploy: ${{ steps.semantic-tag.outputs.should-deploy }}
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Required for semantic versioning
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v3
+        with:
+          version: 9.0.0
+          run_install: false
+
+      - name: Setup Node.js 22 & enable pnpm cache
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22.x'
+          cache: 'pnpm'
+          cache-dependency-path: pnpm-lock.yaml
+
+      - name: Install dependencies
+        run: |
+          # Check if we have frontend directory or if we're in frontend context
+          if [ -d "frontend" ]; then
+            cd frontend
+          fi
+          
+          # If lockfile exists use frozen for reproducibility; else normal install
+          if [ -f pnpm-lock.yaml ]; then
+            pnpm install --frozen-lockfile --prefer-offline
+          else
+            echo "No pnpm-lock.yaml yet – performing non-frozen install (cache still warms)."
+            pnpm install --prefer-offline
+          fi
+
+      - name: Run tests
+        run: |
+          # Check if we have frontend directory
+          if [ -d "frontend" ]; then
+            cd frontend
+          fi
+          
+          set -e
+          if grep -q 'vitest' package.json; then
+            if pnpm exec vitest --version >/dev/null 2>&1; then
+              echo "Running Vitest with JUnit + coverage reporters...";
+              # Generate junit.xml, lcov.info and html report
+              pnpm exec vitest run --reporter=default --reporter=junit --outputFile=junit.xml --coverage --coverage.reporter=lcov --coverage.reporter=html --run
+            else
+              echo "Vitest not installed? Ensure dependency is present."; exit 1
+            fi
+          elif grep -q '"test"' package.json; then
+            echo "Running generic test script...";
+            pnpm test -- --coverage --watchAll=false
+          else
+            echo "No test framework detected – creating placeholder test result"
+            mkdir -p coverage
+            echo "No tests configured" > coverage/test-summary.txt
+          fi
+
+      - name: Run linting
+        run: |
+          # Check if we have frontend directory
+          if [ -d "frontend" ]; then
+            cd frontend
+          fi
+          
+          if grep -q '"lint"' package.json; then
+            echo "Running lint...";
+            pnpm run lint || (echo 'Lint failed' && exit 1)
+          else
+            echo "No lint script found – skipping"
+          fi
+
+      - name: Build application
+        run: |
+          # Check if we have frontend directory
+          if [ -d "frontend" ]; then
+            cd frontend
+          fi
+          
+          if grep -q '"build"' package.json; then
+            echo "Building application...";
+            pnpm run build
+          else
+            echo "No build script found"
+          fi
+
+      - name: Generate semantic version tag
+        id: semantic-tag
+        run: |
+          # Get the latest frontend tag
+          LATEST_TAG=$(git tag -l "frontend-v*" --sort=-version:refname | head -n1 || echo "frontend-v0.0.0")
+          echo "Latest frontend tag: $LATEST_TAG"
+          
+          # Extract version parts (remove frontend- prefix)
+          VERSION=${LATEST_TAG#frontend-v}
+          IFS='.' read -ra VERSION_PARTS <<< "$VERSION"
+          MAJOR=${VERSION_PARTS[0]:-0}
+          MINOR=${VERSION_PARTS[1]:-0}
+          PATCH=${VERSION_PARTS[2]:-0}
+          
+          # Analyze commits since last tag for frontend changes
+          if [ "$LATEST_TAG" = "frontend-v0.0.0" ]; then
+            COMMITS=$(git log --oneline --grep="frontend\|ui\|web" -- frontend/ .github/workflows/frontend/)
+          else
+            COMMITS=$(git log ${LATEST_TAG}..HEAD --oneline -- frontend/ .github/workflows/frontend/)
+          fi
+          
+          echo "Frontend commits to analyze:"
+          echo "$COMMITS"
+          
+          # Check for conventional commit types
+          HAS_FEAT=false
+          HAS_FIX=false
+          HAS_BREAKING=false
+          HAS_VALID_COMMIT=false
+          
+          while IFS= read -r commit; do
+            if [[ $commit =~ ^[a-f0-9]+[[:space:]]+(feat|fix|docs|style|refactor|test|chore)(\(.+\))?!?:[[:space:]].+ ]]; then
+              HAS_VALID_COMMIT=true
+              if [[ $commit =~ feat ]]; then
+                HAS_FEAT=true
+              elif [[ $commit =~ fix ]]; then
+                HAS_FIX=true
+              fi
+              
+              # Check for breaking changes (! after type/scope)
+              if [[ $commit =~ (feat|fix|docs|style|refactor|test|chore)(\(.+\))?! ]] && [ $MAJOR -eq 0 ]; then
+                echo "Error: Breaking change indicator '!' found in commit but version is 0.x.x"
+                echo "Breaking changes are not allowed in version 0.x.x"
+                exit 1
+              elif [[ $commit =~ (feat|fix|docs|style|refactor|test|chore)(\(.+\))?! ]]; then
+                HAS_BREAKING=true
+              fi
+            fi
+          done <<< "$COMMITS"
+          
+          # Only proceed if we're on main branch and have valid commits
+          if [ "${{ github.ref }}" != "refs/heads/main" ] || [ "$HAS_VALID_COMMIT" != "true" ]; then
+            echo "should-deploy=false" >> $GITHUB_OUTPUT
+            echo "new-tag=" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          
+          # Calculate new version
+          if [ "$HAS_BREAKING" = "true" ]; then
+            MAJOR=$((MAJOR + 1))
+            MINOR=0
+            PATCH=0
+          elif [ "$HAS_FEAT" = "true" ]; then
+            MINOR=$((MINOR + 1))
+            PATCH=0
+          elif [ "$HAS_FIX" = "true" ] || [ "$HAS_VALID_COMMIT" = "true" ]; then
+            PATCH=$((PATCH + 1))
+          fi
+          
+          # Handle initial version
+          if [ "$LATEST_TAG" = "frontend-v0.0.0" ]; then
+            NEW_TAG="frontend-v0.1.0"
+          else
+            NEW_TAG="frontend-v${MAJOR}.${MINOR}.${PATCH}"
+          fi
+          
+          echo "New frontend tag: $NEW_TAG"
+          echo "should-deploy=true" >> $GITHUB_OUTPUT
+          echo "new-tag=$NEW_TAG" >> $GITHUB_OUTPUT
+
+  deploy-secrets:
+    name: Deploy Secrets to AWS
+    runs-on: ubuntu-latest
+    needs: test
+    if: github.ref == 'refs/heads/main' && needs.test.outputs.should-deploy == 'true'
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Decrypt environment variables
+        run: |
+          # Create temporary directory for decryption
+          mkdir -p /tmp/decrypted
+          
+          # Look for frontend-specific encrypted files first, fall back to generic
+          if [ -f "frontend/encrypted-env-vars.enc" ]; then
+            ENCRYPTED_PATH="frontend/"
+          else
+            ENCRYPTED_PATH=""
+          fi
+          
+          # Decrypt the AES key using the team private key
+          echo "${{ secrets.TEAM_PRIVATE_KEY }}" > /tmp/private_key.pem
+          openssl rsautl -decrypt -inkey /tmp/private_key.pem -in ${ENCRYPTED_PATH}encrypted-aes-key.enc -out /tmp/aes_key.bin
+          
+          # Decrypt the environment variables
+          openssl enc -aes-256-cbc -d -in ${ENCRYPTED_PATH}encrypted-env-vars.enc -out /tmp/decrypted/env-vars.txt -pass file:/tmp/aes_key.bin
+          
+          # Verify integrity using hash from metadata
+          if [ -f "${ENCRYPTED_PATH}encrypted-env-vars.meta" ]; then
+            EXPECTED_HASH=$(grep "hash:" ${ENCRYPTED_PATH}encrypted-env-vars.meta | cut -d':' -f2 | tr -d ' "')
+            ACTUAL_HASH=$(sha256sum /tmp/decrypted/env-vars.txt | cut -d' ' -f1)
+            
+            if [ -n "$EXPECTED_HASH" ] && [ "$EXPECTED_HASH" != "$ACTUAL_HASH" ]; then
+              echo "Error: Hash verification failed!"
+              echo "Expected: $EXPECTED_HASH"
+              echo "Actual: $ACTUAL_HASH"
+              exit 1
+            fi
+            
+            echo "Hash verification passed"
+          else
+            echo "Warning: No metadata file found for hash verification"
+          fi
+          
+          # Clean up sensitive files
+          rm -f /tmp/private_key.pem /tmp/aes_key.bin
+
+      - name: Deploy secrets to AWS Secrets Manager
+        run: |
+          # Convert env file to JSON format for AWS Secrets Manager
+          python3 << 'EOF'
+          import json
+          import os
+          
+          secrets_dict = {}
+          with open('/tmp/decrypted/env-vars.txt', 'r') as f:
+              for line in f:
+                  line = line.strip()
+                  if line and not line.startswith('#') and '=' in line:
+                      key, value = line.split('=', 1)
+                      # Remove quotes if present
+                      value = value.strip('"').strip("'")
+                      secrets_dict[key] = value
+          
+          # Write to JSON file
+          with open('/tmp/secrets.json', 'w') as f:
+              json.dump(secrets_dict, f)
+          
+          print(f"Converted {len(secrets_dict)} environment variables to JSON")
+          EOF
+          
+          # Update or create the secret in AWS Secrets Manager
+          SECRET_NAME="${{ secrets.AWS_SECRETS_MANAGER_SECRET_NAME_FRONTEND }}"
+          
+          # Check if secret exists
+          if aws secretsmanager describe-secret --secret-id "$SECRET_NAME" > /dev/null 2>&1; then
+            echo "Updating existing secret: $SECRET_NAME"
+            aws secretsmanager update-secret \
+              --secret-id "$SECRET_NAME" \
+              --secret-string file:///tmp/secrets.json \
+              --description "Frontend environment variables - Updated by CI/CD pipeline"
+          else
+            echo "Creating new secret: $SECRET_NAME"
+            aws secretsmanager create-secret \
+              --name "$SECRET_NAME" \
+              --secret-string file:///tmp/secrets.json \
+              --description "Frontend environment variables - Created by CI/CD pipeline"
+          fi
+          
+          # Add tags to the secret
+          aws secretsmanager tag-resource \
+            --secret-id "$SECRET_NAME" \
+            --tags '[
+              {"Key": "Environment", "Value": "production"},
+              {"Key": "Service", "Value": "frontend"},
+              {"Key": "ManagedBy", "Value": "github-actions"},
+              {"Key": "Version", "Value": "${{ needs.test.outputs.new-tag }}"}
+            ]'
+          
+          echo "Successfully deployed secrets to AWS Secrets Manager"
+          
+          # Clean up temporary files
+          rm -f /tmp/decrypted/env-vars.txt /tmp/secrets.json
+
+  build-and-push:
+    name: Build and Push to ECR
+    runs-on: ubuntu-latest
+    needs: [test, deploy-secrets]
+    if: github.ref == 'refs/heads/main' && needs.test.outputs.should-deploy == 'true'
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build, tag, and push image to Amazon ECR
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG: ${{ needs.test.outputs.new-tag }}
+        run: |
+          # Check if we have frontend directory or if we're in frontend context
+          if [ -d "frontend" ]; then
+            cd frontend
+          fi
+          
+          # Build the Docker image (remove frontend-v prefix for image tag)
+          CLEAN_TAG=${IMAGE_TAG#frontend-v}
+          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$CLEAN_TAG .
+          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:latest .
+          
+          # Push the image to ECR
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:$CLEAN_TAG
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
+          
+          echo "Image pushed successfully:"
+          echo "  $ECR_REGISTRY/$ECR_REPOSITORY:$CLEAN_TAG"
+          echo "  $ECR_REGISTRY/$ECR_REPOSITORY:latest"
+
+      - name: Create and push git tag
+        if: needs.test.outputs.new-tag != ''
+        run: |
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          
+          TAG_NAME="${{ needs.test.outputs.new-tag }}"
+          git tag -a $TAG_NAME -m "Release $TAG_NAME - Frontend"
+          git push origin $TAG_NAME
+          
+          echo "Created and pushed tag: $TAG_NAME"
+
+      - name: Create GitHub Release
+        if: needs.test.outputs.new-tag != ''
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ needs.test.outputs.new-tag }}
+          release_name: Frontend Release ${{ needs.test.outputs.new-tag }}
+          body: |
+            ## Frontend Release ${{ needs.test.outputs.new-tag }}
+            
+            ### Changes
+            - Automated release based on conventional commits
+            - Docker image: `${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ needs.test.outputs.new-tag }}`
+            - Environment variables updated in AWS Secrets Manager
+            
+            ### Commit Range
+            View changes: https://github.com/${{ github.repository }}/compare/${{ needs.test.outputs.new-tag }}
+          draft: false
+          prerelease: ${{ startsWith(needs.test.outputs.new-tag, 'v0.') }}
