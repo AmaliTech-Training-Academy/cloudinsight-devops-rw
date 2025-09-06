@@ -337,15 +337,16 @@ jobs:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
           IMAGE_TAG: ${{ needs.test.outputs.new-tag }}
         run: |
-          # Check if we have frontend directory or if we're in frontend context
+          # Determine build context
+          BUILD_CONTEXT="."
           if [ -d "frontend" ]; then
-            cd frontend
+            BUILD_CONTEXT="./frontend"
           fi
           
           # Build the Docker image (remove frontend-v prefix for image tag)
           CLEAN_TAG=${IMAGE_TAG#frontend-v}
-          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$CLEAN_TAG .
-          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:latest .
+          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$CLEAN_TAG $BUILD_CONTEXT
+          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:latest $BUILD_CONTEXT
           
           # Push the image to ECR
           docker push $ECR_REGISTRY/$ECR_REPOSITORY:$CLEAN_TAG
