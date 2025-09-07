@@ -18,16 +18,19 @@ BACKEND_DOCKERFILE="$SCRIPT_DIR/backend/Dockerfile"
 FRONTEND_DOCKERIGNORE="$SCRIPT_DIR/frontend/.dockerignore"
 BACKEND_DOCKERIGNORE="$SCRIPT_DIR/backend/.dockerignore"
 TEMP_DIR="/tmp/dockerfile-deployment-$$"
-BRANCHES=("development" "staging" "production")
+BRANCHES=("main" "development" "staging" "production")
 
 # Default repository list with types
 # Format: "repo-name:type" where type is either "frontend" or "backend"
 REPOS=(
     # Frontend repositories
-    "cloudinsight-frontend-rw:frontend"
+    # "cloudinsight-frontend-rw:frontend"
     
     # Backend repositories  
-    "cloudinsight-user-service-rw:backend"
+    "cloudinsight-api-gateway-rw:backend"
+    "cloudinsight-service-discovery-rw:backend"
+    "cloudinsight-config-server-rw:backend"
+    # "cloudinsight-user-service-rw:backend"
     # "cloudinsight-cost-service-rw:backend"
     # "cloudinsight-metric-service-rw:backend"
     # "cloudinsight-anomaly-service-rw:backend"
