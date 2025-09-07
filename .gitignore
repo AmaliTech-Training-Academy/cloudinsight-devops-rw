@@ -1,1 +1,8 @@
 test-example/
+
+# Terraform
+*.terraform*
+*.tfstate*
+*.tfplan
+.terraform/
+.terraform.lock.hcl
