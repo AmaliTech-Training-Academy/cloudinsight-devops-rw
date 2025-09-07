@@ -35,12 +35,7 @@ module "oidc_secrets_access" {
     {
       name            = "frontend"
       namespace       = "frontend-dev"
-      service_account = "secrets-access-sa"
-    },
-    {
-      name            = "frontend"
-      namespace       = "frontend-dev"
-      service_account = "secrets-access-sa"
+      service_account = "frontend-sa"
     },
     {
       name            = "argocd-repo-server"
@@ -50,42 +45,42 @@ module "oidc_secrets_access" {
     {
       name            = "cost-service"
       namespace       = "cost-service-dev"
-      service_account = "secrets-access-sa"
+      service_account = "cost-service-sa"
     },
     {
       name            = "metric-service"
       namespace       = "metric-service-dev"
-      service_account = "secrets-access-sa"
+      service_account = "metric-service-sa"
     },
     {
       name            = "anomaly-service"
       namespace       = "anomaly-service-dev"
-      service_account = "secrets-access-sa"
+      service_account = "anomaly-service-sa"
     },
     {
       name            = "forecast-service"
       namespace       = "forecast-service-dev"
-      service_account = "secrets-access-sa"
+      service_account = "forecast-service-sa"
     },
     {
       name            = "notification-service"
       namespace       = "notification-service-dev"
-      service_account = "secrets-access-sa"
+      service_account = "notification-service-sa"
     },
     {
       name            = "api-gateway"
       namespace       = "infra-dev"
-      service_account = "secrets-access-sa"
+      service_account = "api-gateway-sa"
     },
     {
       name            = "config-server"
       namespace       = "infra-dev"
-      service_account = "secrets-access-sa"
+      service_account = "config-server-sa"
     },
     {
       name            = "service-discovery"
       namespace       = "infra-dev"
-      service_account = "secrets-access-sa"
+      service_account = "service-discovery-sa"
     }
   ]
 
