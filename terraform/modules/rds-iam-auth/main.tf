@@ -1,3 +1,77 @@
+# Data source for existing Secrets Manager secret
+data "aws_secretsmanager_secret" "user_service" {
+  name = "user-service"
+}
+
+# IAM Role for Pod Identity (Secrets Manager access)
+resource "aws_iam_role" "secrets_access" {
+  name = "${var.cluster_name}-${var.environment}-secrets-access-role"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Principal = {
+          Service = "pods.eks.amazonaws.com"
+        }
+        Action = [
+          "sts:AssumeRole",
+          "sts:TagSession"
+        ]
+      }
+    ]
+  })
+
+  tags = merge(var.common_tags, {
+    Name = "${var.cluster_name}-${var.environment}-secrets-access-role"
+  })
+}
+
+# IAM Policy for Secrets Manager access
+resource "aws_iam_policy" "secrets_access" {
+  name        = "${var.cluster_name}-${var.environment}-secrets-access-policy"
+  description = "Policy for accessing AWS Secrets Manager"
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "secretsmanager:GetSecretValue",
+          "secretsmanager:DescribeSecret"
+        ]
+        Resource = data.aws_secretsmanager_secret.user_service.arn
+      }
+    ]
+  })
+
+  tags = merge(var.common_tags, {
+    Name = "${var.cluster_name}-${var.environment}-secrets-access-policy"
+  })
+}
+
+# Attach policy to role
+resource "aws_iam_role_policy_attachment" "secrets_access" {
+  role       = aws_iam_role.secrets_access.name
+  policy_arn = aws_iam_policy.secrets_access.arn
+}
+
+# Pod Identity Association
+resource "aws_eks_pod_identity_association" "secrets_access" {
+  count = var.create_pod_identity_association ? 1 : 0
+
+  cluster_name    = var.cluster_name
+  namespace       = var.kubernetes_namespace
+  service_account = var.kubernetes_service_account
+  role_arn        = aws_iam_role.secrets_access.arn
+
+  tags = merge(var.common_tags, {
+    Name = "${var.cluster_name}-${var.environment}-secrets-pod-identity"
+  })
+}
+
 # RDS Subnet Group
 resource "aws_db_subnet_group" "main" {
   name       = "${var.cluster_name}-${var.environment}-db-subnet-group"
@@ -6,6 +80,14 @@ resource "aws_db_subnet_group" "main" {
   tags = merge(var.common_tags, {
     Name = "${var.cluster_name}-${var.environment}-db-subnet-group"
   })
+}
+
+# Validation for password requirements
+check "password_requirements" {
+  assert {
+    condition     = var.master_password != null
+    error_message = "master_password must be provided."
+  }
 }
 
 # Security Group for RDS
@@ -50,10 +132,12 @@ resource "aws_db_instance" "main" {
 
   db_name  = var.database_name
   username = var.master_username
+
+  # Use traditional password authentication
   password = var.master_password
 
-  # CRITICAL: Enable IAM database authentication
-  iam_database_authentication_enabled = true
+  # Disable IAM database authentication for traditional setup
+  iam_database_authentication_enabled = false
 
   db_subnet_group_name   = aws_db_subnet_group.main.name
   vpc_security_group_ids = [aws_security_group.rds.id]
@@ -72,61 +156,6 @@ resource "aws_db_instance" "main" {
 
   tags = merge(var.common_tags, {
     Name = "${var.cluster_name}-${var.environment}-postgres"
-  })
-}
-
-# IAM Role for Database Access
-resource "aws_iam_role" "db_access" {
-  name = "${var.cluster_name}-${var.environment}-db-access-role"
-
-  assume_role_policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [
-      {
-        Effect = "Allow"
-        Principal = {
-          Service = "pods.eks.amazonaws.com"
-        }
-        Action = [
-          "sts:AssumeRole",
-          "sts:TagSession"
-        ]
-        Condition = {
-          StringEquals = {
-            "aws:SourceAccount" = data.aws_caller_identity.current.account_id
-          }
-          ArnEquals = {
-            "aws:SourceArn" = "arn:aws:eks:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:cluster/${var.cluster_name}"
-          }
-        }
-      }
-    ]
-  })
-
-  tags = merge(var.common_tags, {
-    Purpose = "Database access via IAM authentication"
-  })
-}
-
-# Policy for RDS Connect
-resource "aws_iam_role_policy" "db_access" {
-  name = "${var.cluster_name}-${var.environment}-db-access-policy"
-  role = aws_iam_role.db_access.id
-
-  policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [
-      {
-        Effect = "Allow"
-        Action = [
-          "rds-db:connect"
-        ]
-        Resource = [
-          for user in var.iam_database_users :
-          "arn:aws:rds-db:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:dbuser:${aws_db_instance.main.identifier}/${user}"
-        ]
-      }
-    ]
   })
 }
 
@@ -158,16 +187,24 @@ resource "aws_iam_role_policy_attachment" "rds_monitoring" {
   policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonRDSEnhancedMonitoringRole"
 }
 
-# EKS Pod Identity Association
-resource "aws_eks_pod_identity_association" "db_access" {
-  count = var.create_pod_identity_association ? 1 : 0
+# Data source to get current secret value
+data "aws_secretsmanager_secret_version" "user_service_current" {
+  secret_id = data.aws_secretsmanager_secret.user_service.id
+}
 
-  cluster_name    = var.cluster_name
-  namespace       = var.kubernetes_namespace
-  service_account = var.kubernetes_service_account
-  role_arn        = aws_iam_role.db_access.arn
+# Store database configuration in AWS Secrets Manager
+resource "aws_secretsmanager_secret_version" "user_service_db_config" {
+  secret_id = data.aws_secretsmanager_secret.user_service.id
+  secret_string = jsonencode(merge(
+    jsondecode(data.aws_secretsmanager_secret_version.user_service_current.secret_string),
+    {
+      DB_URL      = "jdbc:postgresql://${split(":", aws_db_instance.main.endpoint)[0]}:${aws_db_instance.main.port}/${aws_db_instance.main.db_name}?sslmode=require"
+      DB_USERNAME = aws_db_instance.main.username
+      DB_PASSWORD = var.master_password
+    }
+  ))
 
-  tags = merge(var.common_tags, {
-    Purpose = "Database access via IAM authentication"
-  })
+  lifecycle {
+    ignore_changes = [secret_string]
+  }
 }

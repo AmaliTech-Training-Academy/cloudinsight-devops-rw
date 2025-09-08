@@ -130,16 +130,9 @@ variable "monitoring_interval" {
   default     = 60
 }
 
-# IAM Database Users
-variable "iam_database_users" {
-  description = "List of IAM database users to create permissions for"
-  type        = list(string)
-  default     = ["myapp_user"]
-}
-
-# EKS Integration
+# EKS Pod Identity Configuration
 variable "create_pod_identity_association" {
-  description = "Create EKS Pod Identity association"
+  description = "Create EKS Pod Identity association for Secrets Manager access"
   type        = bool
   default     = true
 }
@@ -147,13 +140,13 @@ variable "create_pod_identity_association" {
 variable "kubernetes_namespace" {
   description = "Kubernetes namespace for Pod Identity"
   type        = string
-  default     = "default"
+  default     = "user-service-dev"
 }
 
 variable "kubernetes_service_account" {
   description = "Kubernetes service account for Pod Identity"
   type        = string
-  default     = "myapp-sa"
+  default     = "user-service-sa"
 }
 
 # Tags

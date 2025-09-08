@@ -5,6 +5,7 @@ This module creates an Amazon RDS PostgreSQL instance with IAM database authenti
 ## Features
 
 - RDS PostgreSQL with IAM authentication enabled
+- **Password-less database access** using AWS managed master user password (default)
 - Automatic IAM role creation for database access
 - EKS Pod Identity association
 - Security group with restricted access
@@ -14,20 +15,49 @@ This module creates an Amazon RDS PostgreSQL instance with IAM database authenti
 
 ## Usage
 
+### Default (Recommended): AWS Managed Master Password
+
 ```hcl
 module "rds_iam_auth" {
   source = "../../modules/rds-iam-auth"
-  
+
   cluster_name                = "cloudinsight"
   environment                = "dev-staging"
   vpc_id                     = "vpc-12345678"
   private_subnet_ids         = ["subnet-12345", "subnet-67890"]
   eks_node_security_group_ids = ["sg-12345678"]
-  
-  master_password = var.db_password
-  
+
+  # AWS will manage the master password in Secrets Manager
+  manage_master_user_password = true  # Default
+
   iam_database_users = ["myapp_user"]
-  
+
+  common_tags = {
+    Environment = "dev-staging"
+    Project     = "cloudinsight"
+    Module      = "rds-iam-auth"
+  }
+}
+```
+
+### Alternative: Custom Master Password
+
+```hcl
+module "rds_iam_auth" {
+  source = "../../modules/rds-iam-auth"
+
+  cluster_name                = "cloudinsight"
+  environment                = "dev-staging"
+  vpc_id                     = "vpc-12345678"
+  private_subnet_ids         = ["subnet-12345", "subnet-67890"]
+  eks_node_security_group_ids = ["sg-12345678"]
+
+  # Use custom password
+  manage_master_user_password = false
+  master_password            = var.db_password
+
+  iam_database_users = ["myapp_user"]
+
   common_tags = {
     Environment = "dev-staging"
     Project     = "cloudinsight"
@@ -50,58 +80,61 @@ GRANT CONNECT ON DATABASE myapp TO myapp_user;
 
 ## Requirements
 
-| Name | Version |
-|------|---------|
-| terraform | >= 1.6.0 |
-| aws | ~> 5.0 |
-| kubernetes | ~> 2.0 |
+| Name       | Version  |
+| ---------- | -------- |
+| terraform  | >= 1.6.0 |
+| aws        | ~> 5.0   |
+| kubernetes | ~> 2.0   |
 
 ## Providers
 
 | Name | Version |
-|------|---------|
-| aws | ~> 5.0 |
+| ---- | ------- |
+| aws  | ~> 5.0  |
 
 ## Resources
 
-| Name | Type |
-|------|------|
-| aws_db_instance.main | resource |
-| aws_db_subnet_group.main | resource |
-| aws_security_group.rds | resource |
-| aws_iam_role.db_access | resource |
-| aws_iam_role_policy.db_access | resource |
-| aws_iam_role.rds_monitoring | resource |
+| Name                                          | Type     |
+| --------------------------------------------- | -------- |
+| aws_db_instance.main                          | resource |
+| aws_db_subnet_group.main                      | resource |
+| aws_security_group.rds                        | resource |
+| aws_iam_role.db_access                        | resource |
+| aws_iam_role_policy.db_access                 | resource |
+| aws_iam_role.rds_monitoring                   | resource |
 | aws_iam_role_policy_attachment.rds_monitoring | resource |
-| aws_eks_pod_identity_association.db_access | resource |
+| aws_eks_pod_identity_association.db_access    | resource |
 
 ## Inputs
 
-| Name | Description | Type | Default | Required |
-|------|-------------|------|---------|:--------:|
-| cluster_name | Name of the EKS cluster | `string` | n/a | yes |
-| environment | Environment name (dev, staging, prod) | `string` | n/a | yes |
-| vpc_id | VPC ID where RDS will be deployed | `string` | n/a | yes |
-| private_subnet_ids | List of private subnet IDs for RDS | `list(string)` | n/a | yes |
-| eks_node_security_group_ids | List of EKS node security group IDs | `list(string)` | n/a | yes |
-| master_password | Master password for the database | `string` | n/a | yes |
-| database_name | Name of the database to create | `string` | `"myapp"` | no |
-| master_username | Master username for the database | `string` | `"postgres"` | no |
-| postgres_version | PostgreSQL version | `string` | `"15.4"` | no |
-| instance_class | RDS instance class | `string` | `"db.t3.micro"` | no |
-| iam_database_users | List of IAM database users to create permissions for | `list(string)` | `["myapp_user"]` | no |
-| common_tags | Common tags for all resources | `map(string)` | `{}` | no |
+| Name                        | Description                                                                                                             | Type           | Default          | Required |
+| --------------------------- | ----------------------------------------------------------------------------------------------------------------------- | -------------- | ---------------- | :------: |
+| cluster_name                | Name of the EKS cluster                                                                                                 | `string`       | n/a              |   yes    |
+| environment                 | Environment name (dev, staging, prod)                                                                                   | `string`       | n/a              |   yes    |
+| vpc_id                      | VPC ID where RDS will be deployed                                                                                       | `string`       | n/a              |   yes    |
+| private_subnet_ids          | List of private subnet IDs for RDS                                                                                      | `list(string)` | n/a              |   yes    |
+| eks_node_security_group_ids | List of EKS node security group IDs                                                                                     | `list(string)` | n/a              |   yes    |
+| master_password             | Master password for the database (only used when manage_master_user_password is false)                                  | `string`       | `null`           |    no    |
+| manage_master_user_password | Set to true to allow RDS to manage the master user password in AWS Secrets Manager. Recommended for IAM authentication. | `bool`         | `true`           |    no    |
+| database_name               | Name of the database to create                                                                                          | `string`       | `"myapp"`        |    no    |
+| master_username             | Master username for the database                                                                                        | `string`       | `"postgres"`     |    no    |
+| postgres_version            | PostgreSQL version                                                                                                      | `string`       | `"15.4"`         |    no    |
+| instance_class              | RDS instance class                                                                                                      | `string`       | `"db.t3.micro"`  |    no    |
+| iam_database_users          | List of IAM database users to create permissions for                                                                    | `list(string)` | `["myapp_user"]` |    no    |
+| common_tags                 | Common tags for all resources                                                                                           | `map(string)`  | `{}`             |    no    |
 
 ## Outputs
 
-| Name | Description |
-|------|-------------|
-| rds_instance_id | RDS instance identifier |
-| rds_endpoint | RDS instance endpoint |
-| rds_port | RDS instance port |
-| database_name | Database name |
-| iam_role_arn | ARN of the IAM role for database access |
-| configmap_data | Data for Kubernetes ConfigMap (non-sensitive values) |
-| db_user_arns | ARNs of the IAM database users |
+| Name                      | Description                                                                 |
+| ------------------------- | --------------------------------------------------------------------------- |
+| rds_instance_id           | RDS instance identifier                                                     |
+| rds_endpoint              | RDS instance endpoint                                                       |
+| rds_port                  | RDS instance port                                                           |
+| database_name             | Database name                                                               |
+| iam_role_arn              | ARN of the IAM role for database access                                     |
+| master_user_secret_arn    | ARN of the master user secret (when manage_master_user_password is true)    |
+| master_user_secret_status | Status of the master user secret (when manage_master_user_password is true) |
+| configmap_data            | Data for Kubernetes ConfigMap (non-sensitive values)                        |
+| db_user_arns              | ARNs of the IAM database users                                              |
 
 The module outputs database connection information suitable for Kubernetes ConfigMaps.

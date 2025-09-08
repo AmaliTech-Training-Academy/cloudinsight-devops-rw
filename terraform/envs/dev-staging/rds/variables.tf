@@ -34,6 +34,7 @@ variable "master_password" {
   description = "Master database password"
   type        = string
   sensitive   = true
+  default     = null
 }
 
 variable "postgres_version" {
@@ -91,24 +92,4 @@ variable "monitoring_interval" {
   description = "Enhanced monitoring interval"
   type        = number
   default     = 60
-}
-
-# IAM Database Users
-variable "iam_database_users" {
-  description = "List of IAM database users"
-  type        = list(string)
-  default     = ["cloudinsight_user", "readonly_user"]
-}
-
-# Kubernetes Configuration
-variable "kubernetes_namespace" {
-  description = "Kubernetes namespace"
-  type        = string
-  default     = "default"
-}
-
-variable "kubernetes_service_account" {
-  description = "Kubernetes service account name"
-  type        = string
-  default     = "cloudinsight-sa"
 }

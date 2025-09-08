@@ -1,43 +1,50 @@
 # Data sources for existing infrastructure
-data "aws_vpc" "main" {
-  tags = {
-    Name = "${var.project_name}-${var.environment}-vpc"
+data "terraform_remote_state" "networking" {
+  backend = "s3"
+  config = {
+    bucket  = "cloudinsight-tfstate"
+    key     = "dev-staging/networking.tfstate"
+    region  = var.aws_region
+    encrypt = true
   }
 }
 
-data "aws_subnets" "private" {
-  filter {
-    name   = "vpc-id"
-    values = [data.aws_vpc.main.id]
-  }
-
-  tags = {
-    Tier = "private"
+data "terraform_remote_state" "eks" {
+  backend = "s3"
+  config = {
+    bucket  = "cloudinsight-tfstate"
+    key     = "dev-staging/eks.tfstate"
+    region  = var.aws_region
+    encrypt = true
   }
 }
 
-data "aws_security_groups" "eks_nodes" {
+# Data source to get EKS node security groups (EKS creates these automatically)
+data "aws_security_groups" "eks_node_groups" {
   filter {
     name   = "group-name"
-    values = ["${var.project_name}-${var.environment}-node-*"]
+    values = ["*${data.terraform_remote_state.eks.outputs.cluster_name}*node*"]
   }
 
   filter {
     name   = "vpc-id"
-    values = [data.aws_vpc.main.id]
+    values = [data.terraform_remote_state.networking.outputs.vpc_id]
   }
 }
 
-# RDS with IAM Authentication Module
+# RDS Module with Traditional Authentication
 module "rds_iam_auth" {
   source = "../../../modules/rds-iam-auth"
 
   # Required Configuration
-  cluster_name                = "${var.project_name}-${var.environment}"
-  environment                 = var.environment
-  vpc_id                      = data.aws_vpc.main.id
-  private_subnet_ids          = data.aws_subnets.private.ids
-  eks_node_security_group_ids = data.aws_security_groups.eks_nodes.ids
+  cluster_name       = data.terraform_remote_state.eks.outputs.cluster_name
+  environment        = var.environment
+  vpc_id             = data.terraform_remote_state.networking.outputs.vpc_id
+  private_subnet_ids = data.terraform_remote_state.networking.outputs.private_subnet_ids
+  eks_node_security_group_ids = concat(
+    [data.terraform_remote_state.eks.outputs.cluster_security_group_id],
+    data.aws_security_groups.eks_node_groups.ids
+  )
 
   # Database Configuration
   database_name    = var.database_name
@@ -59,18 +66,18 @@ module "rds_iam_auth" {
   performance_insights_enabled = var.performance_insights_enabled
   monitoring_interval          = var.monitoring_interval
 
-  # IAM Database Users
-  iam_database_users = var.iam_database_users
-
-  # EKS Integration
-  kubernetes_namespace       = var.kubernetes_namespace
-  kubernetes_service_account = var.kubernetes_service_account
+  # EKS Pod Identity for Secrets Manager access
+  create_pod_identity_association = true
+  kubernetes_namespace            = "user-service-dev"
+  kubernetes_service_account      = "user-service-sa"
 
   # Tags
   common_tags = {
     Environment = var.environment
     Project     = var.project_name
     Module      = "rds-iam-auth"
+    ManagedBy   = "terraform"
+    Stack       = "rds"
   }
 }
 
@@ -78,7 +85,7 @@ module "rds_iam_auth" {
 resource "kubernetes_config_map" "db_config" {
   metadata {
     name      = "${var.project_name}-db-config"
-    namespace = var.kubernetes_namespace
+    namespace = "user-service-dev"
 
     labels = {
       "app.kubernetes.io/name"       = "${var.project_name}-db-config"

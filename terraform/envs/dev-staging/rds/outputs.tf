@@ -13,9 +13,14 @@ output "database_name" {
   value       = module.rds_iam_auth.database_name
 }
 
-output "iam_role_arn" {
-  description = "ARN of the IAM role for database access"
-  value       = module.rds_iam_auth.iam_role_arn
+output "secrets_access_role_arn" {
+  description = "ARN of the IAM role for Secrets Manager access"
+  value       = module.rds_iam_auth.secrets_access_role_arn
+}
+
+output "secret_arn" {
+  description = "ARN of the AWS Secrets Manager secret containing database credentials"
+  value       = module.rds_iam_auth.secret_arn
 }
 
 output "configmap_name" {
@@ -23,7 +28,7 @@ output "configmap_name" {
   value       = kubernetes_config_map.db_config.metadata[0].name
 }
 
-output "db_user_arns" {
-  description = "ARNs of the IAM database users"
-  value       = module.rds_iam_auth.db_user_arns
+output "security_group_id" {
+  description = "ID of the RDS security group"
+  value       = module.rds_iam_auth.security_group_id
 }

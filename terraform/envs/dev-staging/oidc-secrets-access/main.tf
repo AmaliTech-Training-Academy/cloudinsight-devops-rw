@@ -43,6 +43,11 @@ module "oidc_secrets_access" {
       service_account = "secrets-access-sa"
     },
     {
+      name            = "user-service"
+      namespace       = "user-service-dev"
+      service_account = "user-service-sa"
+    },
+    {
       name            = "cost-service"
       namespace       = "cost-service-dev"
       service_account = "cost-service-sa"

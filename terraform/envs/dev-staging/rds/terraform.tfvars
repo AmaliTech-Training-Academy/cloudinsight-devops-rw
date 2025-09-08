@@ -7,7 +7,8 @@ project_name = "cloudinsight"
 database_name   = "cloudinsight_dev"
 master_username = "postgres"
 # master_password will be provided via TF_VAR_master_password or -var
-postgres_version = "15.4"
+
+postgres_version = "15.8"
 instance_class   = "db.t3.micro"
 
 # Storage Configuration
@@ -22,13 +23,3 @@ skip_final_snapshot     = true
 # Monitoring
 performance_insights_enabled = false # Disabled for cost savings in dev
 monitoring_interval          = 0     # Disabled for cost savings in dev
-
-# IAM Database Users
-iam_database_users = [
-  "cloudinsight_user",
-  "readonly_user"
-]
-
-# Kubernetes Configuration
-kubernetes_namespace       = "cloudinsight-dev"
-kubernetes_service_account = "cloudinsight-sa"
