@@ -6,7 +6,7 @@ cluster_version = "1.33"
 
 node_group_name      = "general"
 node_instance_types  = ["t3.medium"]
-node_capacity_type   = "SPOT"
+node_capacity_type   = "ON_DEMAND"
 node_min_size        = 0
 node_desired_size    = 1
 node_max_size        = 10
