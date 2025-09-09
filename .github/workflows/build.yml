@@ -1,0 +1,467 @@
+name: Build Workflow
+
+on:
+  workflow_call:
+    inputs:
+      project_type:
+        description: 'Type of project (frontend or backend)'
+        required: true
+        type: string
+      environment:
+        description: 'Target environment (development, staging, production)'
+        required: false
+        type: string
+        default: 'development'
+      push_to_ecr:
+        description: 'Whether to push to AWS ECR'
+        required: false
+        type: boolean
+        default: false
+      run_tests:
+        description: 'Whether to run tests during build'
+        required: false
+        type: boolean
+        default: true
+      docker_platforms:
+        description: 'Docker platforms to build for'
+        required: false
+        type: string
+        default: 'linux/amd64,linux/arm64'
+    secrets:
+      AWS_REGION:
+        description: 'AWS region for ECR'
+        required: false
+      ECR_REPOSITORY_NAME:
+        description: 'ECR repository name'
+        required: false
+      AWS_ACCESS_KEY_ID:
+        description: 'AWS access key ID'
+        required: false
+      AWS_SECRET_ACCESS_KEY:
+        description: 'AWS secret access key'
+        required: false
+      TEAM_PRIVATE_KEY:
+        description: 'Private key for environment decryption'
+        required: false
+    outputs:
+      image_tag:
+        description: 'Built Docker image tag'
+        value: ${{ jobs.build.outputs.image_tag }}
+      image_digest:
+        description: 'Built Docker image digest'
+        value: ${{ jobs.build.outputs.image_digest }}
+      ecr_image_uri:
+        description: 'Full ECR image URI'
+        value: ${{ jobs.build.outputs.ecr_image_uri }}
+      test_result:
+        description: 'Test execution result'
+        value: ${{ jobs.build.outputs.test_result }}
+
+permissions:
+  contents: read
+  checks: write
+  actions: read
+  id-token: write  # For AWS OIDC
+
+jobs:
+  build:
+    name: Build ${{ inputs.project_type }}
+    runs-on: ubuntu-latest
+    outputs:
+      image_tag: ${{ steps.image-meta.outputs.tags }}
+      image_digest: ${{ steps.build-push.outputs.digest }}
+      ecr_image_uri: ${{ steps.ecr-meta.outputs.full_image_uri }}
+      test_result: ${{ steps.test-execution.outputs.result }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up build environment for backend
+        if: inputs.project_type == 'backend'
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+          cache: 'maven'
+
+      - name: Set up build environment for frontend
+        if: inputs.project_type == 'frontend'
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22.x'
+          cache: 'pnpm'
+          cache-dependency-path: pnpm-lock.yaml
+
+      - name: Setup pnpm (frontend)
+        if: inputs.project_type == 'frontend'
+        uses: pnpm/action-setup@v3
+        with:
+          version: 9.0.0
+          run_install: false
+
+      - name: Check for source files
+        id: check-sources
+        run: |
+          echo "Checking for ${{ inputs.project_type }} source files..."
+          
+          if [ "${{ inputs.project_type }}" = "backend" ]; then
+            # Check for Java source files
+            JAVA_FILES=$(find . -name "*.java" -type f | head -5)
+            if [ -z "$JAVA_FILES" ]; then
+              echo "⚠️ No Java source files found in repository"
+              echo "✅ Skipping Java build steps - repository not yet initialized with Java code"
+              echo "has_sources=false" >> $GITHUB_OUTPUT
+            else
+              echo "☕ Java source files found:"
+              echo "$JAVA_FILES"
+              echo "✅ Proceeding with Java build pipeline"
+              echo "has_sources=true" >> $GITHUB_OUTPUT
+            fi
+          else
+            # Check for frontend source files (package.json is minimum requirement)
+            if [ ! -f "package.json" ]; then
+              echo "⚠️ No package.json found in repository"
+              echo "✅ Skipping frontend build steps - repository not yet initialized"
+              echo "has_sources=false" >> $GITHUB_OUTPUT
+            else
+              echo "📦 Frontend project detected (package.json found)"
+              echo "✅ Proceeding with frontend build pipeline"
+              echo "has_sources=true" >> $GITHUB_OUTPUT
+            fi
+          fi
+
+      - name: Early success for repositories without source code
+        if: steps.check-sources.outputs.has_sources == 'false'
+        run: |
+          echo "🎉 Build workflow completed successfully!"
+          echo "✅ Repository validated (no ${{ inputs.project_type }} code found - this is expected for new repositories)"
+          echo "✅ Ready for ${{ inputs.project_type }} development"
+          exit 0
+
+      - name: Install frontend dependencies
+        if: inputs.project_type == 'frontend' && steps.check-sources.outputs.has_sources == 'true'
+        run: |
+          if [ -f pnpm-lock.yaml ]; then
+            pnpm install --frozen-lockfile --prefer-offline
+          else
+            echo "No pnpm-lock.yaml yet – performing non-frozen install"
+            pnpm install --prefer-offline
+          fi
+
+      - name: Prepare environment variables for frontend
+        if: inputs.project_type == 'frontend' && steps.check-sources.outputs.has_sources == 'true'
+        run: |
+          echo "Preparing NEXT_PUBLIC_* variables for build environment..."
+          # Try to source from existing example/test env files
+          for candidate in .env.${ENVIRONMENT} .env.example .env; do
+            if [ -f "$candidate" ]; then
+              echo "Scanning $candidate for NEXT_PUBLIC_* entries"
+              grep '^NEXT_PUBLIC_' "$candidate" | while IFS='=' read -r k v; do
+                if [ -n "$k" ] && [ -n "$v" ]; then
+                  echo "Setting $k from $candidate"
+                  echo "$k=$v" >> $GITHUB_ENV
+                fi
+              done
+              break
+            fi
+          done
+          # Provide safe defaults
+          : ${NEXT_PUBLIC_API_BASE_URL:=http://localhost}
+          : ${NEXT_PUBLIC_NODE_ENV:=${{ inputs.environment }}}
+          echo "NEXT_PUBLIC_API_BASE_URL=${NEXT_PUBLIC_API_BASE_URL}" >> $GITHUB_ENV
+          echo "NEXT_PUBLIC_NODE_ENV=${NEXT_PUBLIC_NODE_ENV}" >> $GITHUB_ENV
+        env:
+          ENVIRONMENT: ${{ inputs.environment }}
+
+      - name: Run tests (if enabled)
+        id: test-execution
+        if: inputs.run_tests && steps.check-sources.outputs.has_sources == 'true'
+        run: |
+          set -e
+          
+          if [ "${{ inputs.project_type }}" = "backend" ]; then
+            echo "Running backend tests..."
+            # Run tests + generate JaCoCo report
+            mvn -B -q org.jacoco:jacoco-maven-plugin:prepare-agent test org.jacoco:jacoco-maven-plugin:report
+            
+            # Ensure report exists
+            if [ ! -f target/site/jacoco/jacoco.xml ]; then 
+              echo "JaCoCo report missing"; 
+              echo "result=error" >> $GITHUB_OUTPUT
+              exit 1
+            fi
+            
+            echo "result=success" >> $GITHUB_OUTPUT
+            
+          else
+            echo "Running frontend tests..."
+            if grep -q 'vitest' package.json; then
+              if pnpm exec vitest --version >/dev/null 2>&1; then
+                echo "Running Vitest with JUnit + coverage reporters..."
+                pnpm exec vitest run --reporter=default --reporter=junit --outputFile=junit.xml --coverage --coverage.reporter=lcov --coverage.reporter=html --run
+              else
+                echo "Vitest not installed? Ensure dependency is present."
+                echo "result=error" >> $GITHUB_OUTPUT
+                exit 1
+              fi
+            elif grep -q '"test"' package.json; then
+              echo "Running generic test script..."
+              pnpm test -- --run || pnpm test
+            else
+              echo "No test framework detected – skipping tests"
+            fi
+            
+            echo "result=success" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Upload test artifacts
+        if: always() && steps.check-sources.outputs.has_sources == 'true'
+        run: |
+          set -e
+          mkdir -p ci-artifacts/${{ inputs.project_type }}
+          
+          if [ "${{ inputs.project_type }}" = "backend" ]; then
+            if ls target/surefire-reports/*.xml >/dev/null 2>&1; then 
+              cp target/surefire-reports/*.xml ci-artifacts/backend/
+            fi
+            [ -f target/site/jacoco/jacoco.xml ] && cp target/site/jacoco/jacoco.xml ci-artifacts/backend/
+            if [ -d target/site/jacoco ]; then 
+              tar -czf ci-artifacts/backend/jacoco-html.tar.gz -C target/site jacoco
+            fi
+          else
+            [ -f junit.xml ] && cp junit.xml ci-artifacts/frontend/ || true
+            [ -f coverage/lcov.info ] && cp coverage/lcov.info ci-artifacts/frontend/ || true
+            if [ -d coverage ]; then 
+              tar -czf ci-artifacts/frontend/coverage-html.tar.gz coverage
+            fi
+          fi
+
+      - name: Store test artifacts
+        if: always() && steps.check-sources.outputs.has_sources == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.project_type }}-test-and-coverage
+          path: ci-artifacts/${{ inputs.project_type }}
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Annotate test results
+        if: always() && steps.check-sources.outputs.has_sources == 'true'
+        uses: dorny/test-reporter@v1
+        with:
+          name: ${{ inputs.project_type }} Tests
+          path: ${{ inputs.project_type == 'backend' && 'target/surefire-reports/*.xml' || 'junit.xml' }}
+          reporter: ${{ inputs.project_type == 'backend' && 'java-junit' || 'jest-junit' }}
+          fail-on-error: false
+        continue-on-error: true
+
+      - name: Decrypt environment variables (optional)
+        if: steps.check-sources.outputs.has_sources == 'true'
+        id: decrypt-env
+        run: |
+          echo "🔍 Checking for encrypted environment files..."
+          cleanup() { rm -f ./team-private-key.pem ./temp-aes-key ./.env; }
+          trap cleanup EXIT
+          
+          ENCRYPTED_DATA=$(find . -maxdepth 1 -name "encrypted-env-vars.enc" -type f | head -1)
+          ENCRYPTED_KEY=$(find . -maxdepth 1 -name "encrypted-aes-key.enc" -type f | head -1)
+          
+          if [[ -z "$ENCRYPTED_DATA" || -z "$ENCRYPTED_KEY" ]]; then 
+            echo "No encrypted env files - skipping"
+            echo "has_encrypted_env=false" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          
+          if [ -z "${{ secrets.TEAM_PRIVATE_KEY }}" ]; then
+            echo "TEAM_PRIVATE_KEY secret not provided - skipping decryption"
+            echo "has_encrypted_env=false" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          
+          echo "${{ secrets.TEAM_PRIVATE_KEY }}" > ./team-private-key.pem
+          chmod 600 ./team-private-key.pem
+          
+          openssl rsautl -decrypt -inkey ./team-private-key.pem -in "$ENCRYPTED_KEY" -out ./temp-aes-key
+          AES_KEY=$(cat ./temp-aes-key)
+          
+          if ! openssl enc -aes-256-gcm -d -in "$ENCRYPTED_DATA" -out "./.env" -pass "pass:$AES_KEY" 2>/dev/null; then
+            openssl enc -aes-256-cbc -d -in "$ENCRYPTED_DATA" -out "./.env" -pass "pass:$AES_KEY" 2>/dev/null || { 
+              echo "Decrypt failed"; 
+              exit 1; 
+            }
+          fi
+          
+          if [[ -f ./.env ]]; then
+            grep -q '^\.env$' .gitignore 2>/dev/null || echo ".env" >> .gitignore
+            git add .gitignore 2>/dev/null || true
+          fi
+          
+          echo "has_encrypted_env=true" >> $GITHUB_OUTPUT
+
+      - name: Extract frontend environment variables
+        if: inputs.project_type == 'frontend' && steps.decrypt-env.outputs.has_encrypted_env == 'true'
+        id: extract-env
+        run: |
+          echo "🔍 Extracting NEXT_PUBLIC_* environment variables..."
+          
+          if [[ ! -f "./.env" ]]; then
+            echo "No .env file found - skipping"
+            echo "has_next_public_vars=false" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          
+          NEXT_PUBLIC_VARS=$(grep '^NEXT_PUBLIC_' ./.env 2>/dev/null || true)
+          
+          if [[ -z "$NEXT_PUBLIC_VARS" ]]; then
+            echo "No NEXT_PUBLIC_* variables found"
+            echo "has_next_public_vars=false" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          
+          VAR_COUNT=$(echo "$NEXT_PUBLIC_VARS" | wc -l)
+          echo "✅ Found $VAR_COUNT NEXT_PUBLIC_* environment variables"
+          echo "has_next_public_vars=true" >> $GITHUB_OUTPUT
+          
+          # Mask values and save for Docker build
+          echo "$NEXT_PUBLIC_VARS" | while IFS='=' read -r key value; do
+            if [[ -n "$key" && -n "$value" ]]; then
+              echo "::add-mask::$value"
+            fi
+          done
+          
+          echo "$NEXT_PUBLIC_VARS" > ./next-public-build-args.txt
+
+      - name: Set up Docker Buildx
+        if: steps.check-sources.outputs.has_sources == 'true'
+        uses: docker/setup-buildx-action@v3
+        with:
+          platforms: ${{ inputs.docker_platforms }}
+
+      - name: Configure AWS credentials (if ECR push enabled)
+        if: inputs.push_to_ecr && steps.check-sources.outputs.has_sources == 'true'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Login to Amazon ECR (if ECR push enabled)
+        if: inputs.push_to_ecr && steps.check-sources.outputs.has_sources == 'true'
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Generate image metadata
+        if: steps.check-sources.outputs.has_sources == 'true'
+        id: image-meta
+        uses: docker/metadata-action@v5
+        with:
+          images: |
+            cloudinsight-${{ inputs.project_type }}
+            ${{ inputs.push_to_ecr && format('{0}/{1}', steps.login-ecr.outputs.registry, secrets.ECR_REPOSITORY_NAME) || '' }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=sha,prefix={{branch}}-
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=raw,value=${{ inputs.environment }}
+          labels: |
+            org.opencontainers.image.title=CloudInsight ${{ inputs.project_type }}
+            org.opencontainers.image.description=CloudInsight ${{ inputs.project_type }} application
+            org.opencontainers.image.vendor=AmaliTech Training Academy
+            org.opencontainers.image.version=${{ github.sha }}
+            cloudinsight.project.type=${{ inputs.project_type }}
+            cloudinsight.project.environment=${{ inputs.environment }}
+            cloudinsight.build.timestamp=${{ github.event.head_commit.timestamp }}
+
+      - name: Build Docker image
+        if: steps.check-sources.outputs.has_sources == 'true'
+        id: build-push
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          platforms: ${{ inputs.docker_platforms }}
+          push: ${{ inputs.push_to_ecr }}
+          tags: ${{ steps.image-meta.outputs.tags }}
+          labels: ${{ steps.image-meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          build-args: |
+            BUILDPLATFORM=linux/amd64
+            TARGETPLATFORM=linux/amd64
+            ${{ inputs.project_type == 'frontend' && steps.extract-env.outputs.has_next_public_vars == 'true' && format('BUILD_ENV_FILE={0}', './next-public-build-args.txt') || '' }}
+
+      - name: Generate ECR image metadata
+        if: inputs.push_to_ecr && steps.check-sources.outputs.has_sources == 'true'
+        id: ecr-meta
+        run: |
+          ECR_REGISTRY="${{ steps.login-ecr.outputs.registry }}"
+          ECR_REPOSITORY="${{ secrets.ECR_REPOSITORY_NAME }}"
+          IMAGE_TAG="${{ github.sha }}"
+          
+          FULL_IMAGE_URI="${ECR_REGISTRY}/${ECR_REPOSITORY}:${IMAGE_TAG}"
+          echo "full_image_uri=$FULL_IMAGE_URI" >> $GITHUB_OUTPUT
+          
+          # Generate ArgoCD-compatible image metadata
+          mkdir -p build-metadata
+          
+          cat > build-metadata/image-metadata.json << EOF
+          {
+            "image": {
+              "registry": "$ECR_REGISTRY",
+              "repository": "$ECR_REPOSITORY", 
+              "tag": "$IMAGE_TAG",
+              "digest": "${{ steps.build-push.outputs.digest }}",
+              "fullUri": "$FULL_IMAGE_URI"
+            },
+            "build": {
+              "commit": "${{ github.sha }}",
+              "branch": "${{ github.ref_name }}",
+              "timestamp": "${{ github.event.head_commit.timestamp }}",
+              "environment": "${{ inputs.environment }}",
+              "projectType": "${{ inputs.project_type }}"
+            },
+            "argocd": {
+              "application": "cloudinsight-${{ inputs.project_type }}-${{ inputs.environment }}",
+              "targetRevision": "${{ github.sha }}"
+            }
+          }
+          EOF
+          
+          echo "Generated ArgoCD-compatible metadata:"
+          cat build-metadata/image-metadata.json
+
+      - name: Upload build metadata
+        if: steps.check-sources.outputs.has_sources == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-metadata-${{ inputs.project_type }}-${{ inputs.environment }}
+          path: build-metadata/
+          retention-days: 30
+
+      - name: Build summary
+        if: always() && steps.check-sources.outputs.has_sources == 'true'
+        run: |
+          echo "## Build Summary" >> $GITHUB_STEP_SUMMARY
+          echo "**Project Type:** ${{ inputs.project_type }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Environment:** ${{ inputs.environment }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Platforms:** ${{ inputs.docker_platforms }}" >> $GITHUB_STEP_SUMMARY
+          
+          if [ "${{ inputs.run_tests }}" = "true" ]; then
+            echo "**Tests:** ${{ steps.test-execution.outputs.result }}" >> $GITHUB_STEP_SUMMARY
+          fi
+          
+          if [ "${{ inputs.push_to_ecr }}" = "true" ]; then
+            echo "**ECR Push:** Enabled" >> $GITHUB_STEP_SUMMARY
+            if [ -n "${{ steps.ecr-meta.outputs.full_image_uri }}" ]; then
+              echo "**Image URI:** \`${{ steps.ecr-meta.outputs.full_image_uri }}\`" >> $GITHUB_STEP_SUMMARY
+            fi
+          else
+            echo "**ECR Push:** Disabled" >> $GITHUB_STEP_SUMMARY
+          fi
+          
+          echo "**Image Digest:** ${{ steps.build-push.outputs.digest }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Build completed successfully! 🎉" >> $GITHUB_STEP_SUMMARY

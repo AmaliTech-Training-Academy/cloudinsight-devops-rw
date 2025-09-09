@@ -1,0 +1,376 @@
+name: Security Scanning Workflow
+
+on:
+  workflow_call:
+    inputs:
+      project_type:
+        description: 'Type of project (frontend or backend)'
+        required: true
+        type: string
+      sonar_project_key:
+        description: 'SonarQube project key override'
+        required: false
+        type: string
+      trivy_severity:
+        description: 'Trivy severity threshold (CRITICAL,HIGH,MEDIUM,LOW)'
+        required: false
+        type: string
+        default: 'HIGH,CRITICAL'
+      skip_quality_gate:
+        description: 'Skip SonarQube quality gate check'
+        required: false
+        type: boolean
+        default: false
+    secrets:
+      SONARQUBE_URL:
+        description: 'SonarQube server URL'
+        required: true
+      SONARQUBE_TOKEN:
+        description: 'SonarQube authentication token'
+        required: true
+      SONARQUBE_PROJECT_KEY:
+        description: 'SonarQube project key'
+        required: false
+      TRIVY_SERVER_URL:
+        description: 'Trivy server URL (optional)'
+        required: false
+      TRIVY_TOKEN:
+        description: 'Trivy authentication token (optional)'
+        required: false
+    outputs:
+      sonar_quality_gate_status:
+        description: 'SonarQube quality gate status'
+        value: ${{ jobs.security-scan.outputs.quality_gate_status }}
+      trivy_scan_result:
+        description: 'Trivy scan result'
+        value: ${{ jobs.security-scan.outputs.trivy_result }}
+
+permissions:
+  contents: read
+  checks: write
+  security-events: write
+
+jobs:
+  security-scan:
+    name: Security Analysis
+    runs-on: ubuntu-latest
+    outputs:
+      quality_gate_status: ${{ steps.sonar-quality-gate.outputs.quality_gate_status }}
+      trivy_result: ${{ steps.trivy-scan.outputs.scan_result }}
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Shallow clones should be disabled for better analysis
+
+      - name: Set up SonarQube project key
+        id: sonar-config
+        run: |
+          if [ -n "${{ inputs.sonar_project_key }}" ]; then
+            PROJECT_KEY="${{ inputs.sonar_project_key }}"
+          elif [ -n "${{ secrets.SONARQUBE_PROJECT_KEY }}" ]; then
+            PROJECT_KEY="${{ secrets.SONARQUBE_PROJECT_KEY }}"
+          else
+            # Generate project key from repository name and project type
+            REPO_NAME="${{ github.repository }}"
+            PROJECT_KEY="${REPO_NAME##*/}-${{ inputs.project_type }}"
+          fi
+          echo "project_key=$PROJECT_KEY" >> $GITHUB_OUTPUT
+          echo "Using SonarQube project key: $PROJECT_KEY"
+
+      - name: Set up Java for SonarQube (if backend)
+        if: inputs.project_type == 'backend'
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+          cache: 'maven'
+
+      - name: Set up Node.js for SonarQube (if frontend)
+        if: inputs.project_type == 'frontend'
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22.x'
+          cache: 'pnpm'
+          cache-dependency-path: pnpm-lock.yaml
+
+      - name: Setup pnpm (if frontend)
+        if: inputs.project_type == 'frontend'
+        uses: pnpm/action-setup@v3
+        with:
+          version: 9.0.0
+
+      - name: Install frontend dependencies (if frontend)
+        if: inputs.project_type == 'frontend'
+        run: |
+          if [ -f pnpm-lock.yaml ]; then
+            pnpm install --frozen-lockfile --prefer-offline
+          else
+            pnpm install --prefer-offline
+          fi
+
+      - name: Download test artifacts for analysis
+        id: download-artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.project_type }}-test-and-coverage
+          path: test-artifacts/
+        continue-on-error: true
+
+      - name: Prepare SonarQube analysis parameters
+        id: sonar-params
+        run: |
+          echo "Preparing SonarQube analysis parameters for ${{ inputs.project_type }}..."
+          
+          SONAR_ARGS=""
+          
+          if [ "${{ inputs.project_type }}" = "backend" ]; then
+            # Backend (Java/Maven) specific parameters
+            SONAR_ARGS="-Dsonar.projectKey=${{ steps.sonar-config.outputs.project_key }}"
+            SONAR_ARGS="$SONAR_ARGS -Dsonar.sources=src/main/java"
+            SONAR_ARGS="$SONAR_ARGS -Dsonar.tests=src/test/java"
+            SONAR_ARGS="$SONAR_ARGS -Dsonar.java.binaries=target/classes"
+            SONAR_ARGS="$SONAR_ARGS -Dsonar.java.test.binaries=target/test-classes"
+            
+            # Coverage reports
+            if [ -f test-artifacts/jacoco.xml ]; then
+              SONAR_ARGS="$SONAR_ARGS -Dsonar.coverage.jacoco.xmlReportPaths=test-artifacts/jacoco.xml"
+            elif [ -f target/site/jacoco/jacoco.xml ]; then
+              SONAR_ARGS="$SONAR_ARGS -Dsonar.coverage.jacoco.xmlReportPaths=target/site/jacoco/jacoco.xml"
+            fi
+            
+            # Test reports
+            if [ -d test-artifacts ] && ls test-artifacts/*.xml >/dev/null 2>&1; then
+              SONAR_ARGS="$SONAR_ARGS -Dsonar.junit.reportPaths=test-artifacts"
+            elif [ -d target/surefire-reports ]; then
+              SONAR_ARGS="$SONAR_ARGS -Dsonar.junit.reportPaths=target/surefire-reports"
+            fi
+            
+          else
+            # Frontend (Node.js) specific parameters
+            SONAR_ARGS="-Dsonar.projectKey=${{ steps.sonar-config.outputs.project_key }}"
+            SONAR_ARGS="$SONAR_ARGS -Dsonar.sources=src,app,pages,components,lib,utils"
+            SONAR_ARGS="$SONAR_ARGS -Dsonar.tests=__tests__,tests,src/**/*.test.*,src/**/*.spec.*"
+            SONAR_ARGS="$SONAR_ARGS -Dsonar.javascript.node.maxspace=4096"
+            
+            # Coverage reports  
+            if [ -f test-artifacts/lcov.info ]; then
+              SONAR_ARGS="$SONAR_ARGS -Dsonar.javascript.lcov.reportPaths=test-artifacts/lcov.info"
+            elif [ -f coverage/lcov.info ]; then
+              SONAR_ARGS="$SONAR_ARGS -Dsonar.javascript.lcov.reportPaths=coverage/lcov.info"
+            fi
+            
+            # Test reports
+            if [ -f test-artifacts/junit.xml ]; then
+              SONAR_ARGS="$SONAR_ARGS -Dsonar.testExecutionReportPaths=test-artifacts/junit.xml"
+            elif [ -f junit.xml ]; then
+              SONAR_ARGS="$SONAR_ARGS -Dsonar.testExecutionReportPaths=junit.xml"
+            fi
+          fi
+          
+          echo "sonar_args=$SONAR_ARGS" >> $GITHUB_OUTPUT
+          echo "SonarQube arguments: $SONAR_ARGS"
+
+      - name: SonarQube Scan
+        uses: sonarqube-quality-gate-action@master
+        env:
+          SONAR_TOKEN: ${{ secrets.SONARQUBE_TOKEN }}
+          SONAR_HOST_URL: ${{ secrets.SONARQUBE_URL }}
+        with:
+          scanMetadataReportFile: .scannerwork/report-task.txt
+        continue-on-error: true
+
+      - name: Run SonarQube Analysis
+        run: |
+          echo "Running SonarQube analysis..."
+          
+          # Install SonarQube scanner if not available
+          if ! command -v sonar-scanner &> /dev/null; then
+            echo "Installing SonarQube scanner..."
+            wget -q https://binaries.sonarsource.com/Distribution/sonar-scanner-cli/sonar-scanner-cli-4.8.0.2856-linux.zip
+            unzip -q sonar-scanner-cli-4.8.0.2856-linux.zip
+            export PATH="$PWD/sonar-scanner-4.8.0.2856-linux/bin:$PATH"
+          fi
+          
+          # Run analysis
+          sonar-scanner \
+            -Dsonar.host.url="${{ secrets.SONARQUBE_URL }}" \
+            -Dsonar.login="${{ secrets.SONARQUBE_TOKEN }}" \
+            ${{ steps.sonar-params.outputs.sonar_args }}
+
+      - name: Wait for SonarQube Quality Gate
+        id: sonar-quality-gate
+        if: ${{ !inputs.skip_quality_gate }}
+        run: |
+          echo "Waiting for SonarQube quality gate analysis..."
+          
+          # Read task report
+          if [ ! -f .scannerwork/report-task.txt ]; then
+            echo "No SonarQube task report found"
+            echo "quality_gate_status=ERROR" >> $GITHUB_OUTPUT
+            exit 1
+          fi
+          
+          # Extract task URL
+          TASK_URL=$(grep ceTaskUrl .scannerwork/report-task.txt | cut -d'=' -f2-)
+          echo "Task URL: $TASK_URL"
+          
+          # Wait for analysis completion and check quality gate
+          max_attempts=60
+          attempt=0
+          
+          while [ $attempt -lt $max_attempts ]; do
+            echo "Checking analysis status... (attempt $((attempt + 1))/$max_attempts)"
+            
+            # Get task status
+            TASK_STATUS=$(curl -s -u "${{ secrets.SONARQUBE_TOKEN }}:" \
+              "$TASK_URL" | jq -r '.task.status')
+            
+            if [ "$TASK_STATUS" = "SUCCESS" ]; then
+              echo "✅ Analysis completed successfully"
+              
+              # Get quality gate status
+              ANALYSIS_ID=$(curl -s -u "${{ secrets.SONARQUBE_TOKEN }}:" \
+                "$TASK_URL" | jq -r '.task.analysisId')
+              
+              QG_STATUS=$(curl -s -u "${{ secrets.SONARQUBE_TOKEN }}:" \
+                "${{ secrets.SONARQUBE_URL }}/api/qualitygates/project_status?analysisId=$ANALYSIS_ID" \
+                | jq -r '.projectStatus.status')
+              
+              echo "Quality Gate Status: $QG_STATUS"
+              echo "quality_gate_status=$QG_STATUS" >> $GITHUB_OUTPUT
+              
+              if [ "$QG_STATUS" = "OK" ]; then
+                echo "✅ Quality gate passed"
+                exit 0
+              else
+                echo "❌ Quality gate failed"
+                exit 1
+              fi
+              
+            elif [ "$TASK_STATUS" = "FAILED" ]; then
+              echo "❌ SonarQube analysis failed"
+              echo "quality_gate_status=ERROR" >> $GITHUB_OUTPUT
+              exit 1
+            fi
+            
+            sleep 10
+            attempt=$((attempt + 1))
+          done
+          
+          echo "⏰ Quality gate check timed out"
+          echo "quality_gate_status=TIMEOUT" >> $GITHUB_OUTPUT
+          exit 1
+
+      - name: Install Trivy
+        run: |
+          echo "Installing Trivy security scanner..."
+          sudo apt-get update
+          sudo apt-get install -y wget apt-transport-https gnupg lsb-release
+          wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key | sudo apt-key add -
+          echo "deb https://aquasecurity.github.io/trivy-repo/deb $(lsb_release -sc) main" | sudo tee -a /etc/apt/sources.list.d/trivy.list
+          sudo apt-get update
+          sudo apt-get install -y trivy
+
+      - name: Run Trivy filesystem scan
+        id: trivy-scan
+        run: |
+          echo "Running Trivy filesystem security scan..."
+          
+          # Set Trivy server configuration if provided
+          TRIVY_ARGS=""
+          if [ -n "${{ secrets.TRIVY_SERVER_URL }}" ]; then
+            export TRIVY_SERVER="${{ secrets.TRIVY_SERVER_URL }}"
+            TRIVY_ARGS="$TRIVY_ARGS --server ${{ secrets.TRIVY_SERVER_URL }}"
+          fi
+          
+          if [ -n "${{ secrets.TRIVY_TOKEN }}" ]; then
+            export TRIVY_TOKEN="${{ secrets.TRIVY_TOKEN }}"
+            TRIVY_ARGS="$TRIVY_ARGS --token ${{ secrets.TRIVY_TOKEN }}"
+          fi
+          
+          # Create output directory
+          mkdir -p security-reports
+          
+          # Run filesystem scan
+          echo "Scanning filesystem for vulnerabilities..."
+          trivy fs \
+            --format sarif \
+            --output security-reports/trivy-fs.sarif \
+            --severity "${{ inputs.trivy_severity }}" \
+            $TRIVY_ARGS \
+            .
+          
+          # Also create a table format for human reading
+          trivy fs \
+            --format table \
+            --output security-reports/trivy-fs.txt \
+            --severity "${{ inputs.trivy_severity }}" \
+            $TRIVY_ARGS \
+            .
+          
+          # Check exit code for critical/high vulnerabilities
+          if trivy fs \
+            --format json \
+            --severity "${{ inputs.trivy_severity }}" \
+            --quiet \
+            $TRIVY_ARGS \
+            . > security-reports/trivy-fs.json; then
+            
+            # Count vulnerabilities
+            VULN_COUNT=$(jq '[.Results[]?.Vulnerabilities[]?] | length' security-reports/trivy-fs.json)
+            echo "Found $VULN_COUNT vulnerabilities"
+            
+            if [ "$VULN_COUNT" -gt 0 ]; then
+              echo "scan_result=VULNERABILITIES_FOUND" >> $GITHUB_OUTPUT
+              echo "⚠️ Trivy found $VULN_COUNT vulnerabilities"
+              
+              # Show summary
+              echo "## Trivy Security Scan Results" >> $GITHUB_STEP_SUMMARY
+              echo "**Vulnerabilities found:** $VULN_COUNT" >> $GITHUB_STEP_SUMMARY
+              echo "**Severity threshold:** ${{ inputs.trivy_severity }}" >> $GITHUB_STEP_SUMMARY
+              
+              # Fail the build if critical vulnerabilities found
+              exit 1
+            else
+              echo "scan_result=CLEAN" >> $GITHUB_OUTPUT
+              echo "✅ No vulnerabilities found"
+            fi
+          else
+            echo "scan_result=ERROR" >> $GITHUB_OUTPUT
+            echo "❌ Trivy scan failed"
+            exit 1
+          fi
+
+      - name: Upload Trivy scan results to GitHub Security tab
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: security-reports/trivy-fs.sarif
+          category: trivy-filesystem
+
+      - name: Upload security scan artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: security-scan-results-${{ inputs.project_type }}
+          path: security-reports/
+          retention-days: 30
+
+      - name: Security scan summary
+        if: always()
+        run: |
+          echo "## Security Scan Summary" >> $GITHUB_STEP_SUMMARY
+          echo "**Project Type:** ${{ inputs.project_type }}" >> $GITHUB_STEP_SUMMARY
+          echo "**SonarQube Project:** ${{ steps.sonar-config.outputs.project_key }}" >> $GITHUB_STEP_SUMMARY
+          
+          if [ "${{ steps.sonar-quality-gate.outputs.quality_gate_status }}" != "" ]; then
+            echo "**SonarQube Quality Gate:** ${{ steps.sonar-quality-gate.outputs.quality_gate_status }}" >> $GITHUB_STEP_SUMMARY
+          fi
+          
+          if [ "${{ steps.trivy-scan.outputs.scan_result }}" != "" ]; then
+            echo "**Trivy Scan Result:** ${{ steps.trivy-scan.outputs.scan_result }}" >> $GITHUB_STEP_SUMMARY
+          fi
+          
+          echo "Security analysis completed for ${{ inputs.project_type }} project."
