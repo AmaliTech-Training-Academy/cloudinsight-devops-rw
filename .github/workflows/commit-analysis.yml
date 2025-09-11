@@ -1,0 +1,202 @@
+name: Commit Analysis
+
+on:
+  workflow_call:
+    outputs:
+      should_build:
+        description: "Whether to build and test"
+        value: ${{ jobs.analyze.outputs.should_build }}
+      version_bump:
+        description: "Type of version bump (major/minor/patch/none)"
+        value: ${{ jobs.analyze.outputs.version_bump }}
+      new_version:
+        description: "Calculated new version"
+        value: ${{ jobs.analyze.outputs.new_version }}
+
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+    outputs:
+      should_build: ${{ steps.analysis.outputs.should_build }}
+      version_bump: ${{ steps.analysis.outputs.version_bump }}
+      new_version: ${{ steps.analysis.outputs.new_version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          
+      - name: Analyze Commits
+        id: analysis
+        run: |
+          echo "🔍 Analyzing commits for semantic versioning..."
+          
+          # Get commits since last merge to main/development or since last tag
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            # For PRs, analyze commits in the PR
+            commits=$(git log --oneline ${{ github.event.pull_request.base.sha }}..${{ github.sha }} --pretty=format:"%s")
+          else
+            # For pushes, analyze commits since last merge or tag
+            last_merge=$(git log --merges --oneline -1 --pretty=format:"%H" 2>/dev/null || echo "")
+            if [ -n "$last_merge" ]; then
+              commits=$(git log --oneline ${last_merge}..HEAD --pretty=format:"%s")
+            else
+              # No merge found, get commits since last tag
+              last_tag=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+              if [ -n "$last_tag" ]; then
+                commits=$(git log --oneline ${last_tag}..HEAD --pretty=format:"%s")
+              else
+                # No tags, analyze recent commits
+                commits=$(git log --oneline -10 --pretty=format:"%s")
+              fi
+            fi
+          fi
+          
+          echo "Commits to analyze:"
+          echo "$commits"
+          echo ""
+          
+          # Initialize flags
+          has_breaking=false
+          has_feat=false
+          has_fix=false
+          has_refactor=false
+          only_no_build=true
+          
+          # Analyze each commit
+          while IFS= read -r commit; do
+            if [ -z "$commit" ]; then
+              continue
+            fi
+            
+            echo "Analyzing: $commit"
+            
+            # Check for breaking changes (any type with !)
+            if [[ $commit =~ ^[a-zA-Z]+!.*$ ]]; then
+              echo "  ✅ Breaking change detected"
+              has_breaking=true
+              only_no_build=false
+            # Check for feature commits
+            elif [[ $commit =~ ^feat.*$ ]]; then
+              echo "  ✅ Feature commit detected"
+              has_feat=true
+              only_no_build=false
+            # Check for fix commits
+            elif [[ $commit =~ ^fix.*$ ]]; then
+              echo "  ✅ Fix commit detected"
+              has_fix=true
+              only_no_build=false
+            # Check for refactor commits
+            elif [[ $commit =~ ^refactor.*$ ]]; then
+              echo "  ✅ Refactor commit detected"
+              has_refactor=true
+              only_no_build=false
+            # Check for non-build commits
+            elif [[ $commit =~ ^(docs|style|test|chore).*$ ]]; then
+              echo "  ℹ️ Non-functional change (docs/style/test/chore)"
+              # These don't affect only_no_build flag
+              continue
+            else
+              # Unknown commit type, treat as feature for safety
+              echo "  ⚠️ Unknown commit type, treating as feature"
+              has_feat=true
+              only_no_build=false
+            fi
+          done <<< "$commits"
+          
+          echo ""
+          echo "📊 Analysis Results:"
+          echo "  Breaking changes: $has_breaking"
+          echo "  Features: $has_feat"
+          echo "  Fixes: $has_fix"
+          echo "  Refactors: $has_refactor"
+          echo "  Only non-functional: $only_no_build"
+          echo ""
+          
+          # Determine version bump and build necessity
+          if [ "$only_no_build" = true ]; then
+            echo "🚫 Should build: false (only docs/style/test/chore changes)"
+            echo "should_build=false" >> $GITHUB_OUTPUT
+            echo "version_bump=none" >> $GITHUB_OUTPUT
+            echo "new_version=" >> $GITHUB_OUTPUT
+          else
+            echo "✅ Should build: true (functional changes detected)"
+            echo "should_build=true" >> $GITHUB_OUTPUT
+            
+            # Get latest tag
+            latest_tag=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+            echo "Latest tag: $latest_tag"
+            
+            # Parse version (remove 'v' prefix and any suffix like '-rc')
+            if [ -n "$latest_tag" ]; then
+              version=$(echo $latest_tag | sed 's/^v//' | sed 's/-.*$//')
+            else
+              version="0.0.0"
+            fi
+            
+            echo "Current version: $version"
+            
+            # Split version into components
+            IFS='.' read -ra VERSION_PARTS <<< "$version"
+            major=${VERSION_PARTS[0]:-0}
+            minor=${VERSION_PARTS[1]:-0}
+            patch=${VERSION_PARTS[2]:-0}
+            
+            echo "Version components: major=$major, minor=$minor, patch=$patch"
+            
+            # Calculate new version based on commit analysis
+            if [ "$has_breaking" = true ]; then
+              new_major=$((major + 1))
+              new_version="v${new_major}.0.0"
+              echo "version_bump=major" >> $GITHUB_OUTPUT
+              echo "🔥 Version bump: MAJOR (breaking changes)"
+            elif [ "$has_feat" = true ]; then
+              new_minor=$((minor + 1))
+              new_version="v${major}.${new_minor}.0"
+              echo "version_bump=minor" >> $GITHUB_OUTPUT
+              echo "✨ Version bump: MINOR (new features)"
+            elif [ "$has_fix" = true ] || [ "$has_refactor" = true ]; then
+              new_patch=$((patch + 1))
+              new_version="v${major}.${minor}.${new_patch}"
+              echo "version_bump=patch" >> $GITHUB_OUTPUT
+              echo "🔧 Version bump: PATCH (fixes/refactors)"
+            else
+              # Fallback - should not reach here given the logic above
+              new_patch=$((patch + 1))
+              new_version="v${major}.${minor}.${new_patch}"
+              echo "version_bump=patch" >> $GITHUB_OUTPUT
+              echo "🔧 Version bump: PATCH (fallback)"
+            fi
+            
+            # Handle first version case
+            if [ "$version" = "0.0.0" ] || [ -z "$latest_tag" ]; then
+              new_version="v0.1.0"
+              echo "version_bump=minor" >> $GITHUB_OUTPUT
+              echo "🎉 First version: starting with v0.1.0"
+            fi
+            
+            echo "new_version=$new_version" >> $GITHUB_OUTPUT
+            echo "🏷️ New version: $new_version"
+          fi
+          
+          echo ""
+          echo "📋 Summary:"
+          echo "  Should build: $([ "$only_no_build" = true ] && echo "false" || echo "true")"
+          echo "  Version bump: $([ "$only_no_build" = true ] && echo "none" || echo "$new_version")"
+
+      - name: Analysis Summary
+        run: |
+          echo "## 🔍 Commit Analysis Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Should Build:** ${{ steps.analysis.outputs.should_build }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Version Bump:** ${{ steps.analysis.outputs.version_bump }}" >> $GITHUB_STEP_SUMMARY
+          
+          if [ "${{ steps.analysis.outputs.new_version }}" != "" ]; then
+            echo "**New Version:** ${{ steps.analysis.outputs.new_version }}" >> $GITHUB_STEP_SUMMARY
+          fi
+          
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Conventional Commit Analysis" >> $GITHUB_STEP_SUMMARY
+          echo "- **MAJOR** (v1.0.0 → v2.0.0): Breaking changes (\`feat!\`, \`fix!\`, etc.)" >> $GITHUB_STEP_SUMMARY
+          echo "- **MINOR** (v1.0.0 → v1.1.0): New features (\`feat\`)" >> $GITHUB_STEP_SUMMARY
+          echo "- **PATCH** (v1.0.0 → v1.0.1): Bug fixes and refactors (\`fix\`, \`refactor\`)" >> $GITHUB_STEP_SUMMARY
+          echo "- **NONE**: Documentation and non-functional changes (\`docs\`, \`style\`, \`test\`, \`chore\`)" >> $GITHUB_STEP_SUMMARY
