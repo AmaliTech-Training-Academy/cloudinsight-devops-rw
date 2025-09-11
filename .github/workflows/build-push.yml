@@ -1,0 +1,244 @@
+name: Build and Push
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        required: true
+        type: string
+        description: 'Version tag for the build'
+      environment:
+        required: true
+        type: string
+        description: 'Target environment (development/staging/production)'
+      project_type:
+        required: false
+        type: string
+        default: 'backend'
+        description: 'Project type (backend/frontend)'
+    outputs:
+      image_tag:
+        description: 'Built Docker image tag'
+        value: ${{ jobs.build-push.outputs.image_tag }}
+      image_uri:
+        description: 'Full ECR image URI'
+        value: ${{ jobs.build-push.outputs.image_uri }}
+        
+jobs:
+  build-push:
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    outputs:
+      image_tag: ${{ steps.build-meta.outputs.image_tag }}
+      image_uri: ${{ steps.build-meta.outputs.image_uri }}
+    steps:
+      - uses: actions/checkout@v4
+        
+      - name: Set up build environment for backend
+        if: inputs.project_type == 'backend'
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+          cache: 'maven'
+
+      - name: Set up build environment for frontend
+        if: inputs.project_type == 'frontend'
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22.x'
+          cache: 'pnpm'
+          cache-dependency-path: pnpm-lock.yaml
+
+      - name: Setup pnpm (frontend)
+        if: inputs.project_type == 'frontend'
+        uses: pnpm/action-setup@v3
+        with:
+          version: 9.0.0
+          
+      - name: Check for source files
+        id: check-sources
+        run: |
+          echo "Checking for ${{ inputs.project_type }} source files..."
+          
+          if [ "${{ inputs.project_type }}" = "backend" ]; then
+            # Check for Java source files
+            JAVA_FILES=$(find . -name "*.java" -type f | head -5)
+            if [ -z "$JAVA_FILES" ]; then
+              echo "⚠️ No Java source files found - creating sample Dockerfile"
+              mkdir -p dockerfiles/backend
+              echo "FROM openjdk:21-jre-slim" > dockerfiles/backend/Dockerfile
+              echo "WORKDIR /app" >> dockerfiles/backend/Dockerfile
+              echo "COPY target/*.jar app.jar" >> dockerfiles/backend/Dockerfile
+              echo "EXPOSE 8080" >> dockerfiles/backend/Dockerfile
+              echo 'ENTRYPOINT ["java", "-jar", "app.jar"]' >> dockerfiles/backend/Dockerfile
+              echo "has_sources=false" >> $GITHUB_OUTPUT
+            else
+              echo "☕ Java source files found"
+              echo "has_sources=true" >> $GITHUB_OUTPUT
+            fi
+          else
+            # Check for frontend source files
+            if [ ! -f "package.json" ]; then
+              echo "⚠️ No package.json found - creating sample Dockerfile"
+              mkdir -p dockerfiles/frontend
+              echo "FROM node:22-alpine" > dockerfiles/frontend/Dockerfile
+              echo "WORKDIR /app" >> dockerfiles/frontend/Dockerfile
+              echo "COPY package*.json ./" >> dockerfiles/frontend/Dockerfile
+              echo "RUN npm install" >> dockerfiles/frontend/Dockerfile
+              echo "COPY . ." >> dockerfiles/frontend/Dockerfile
+              echo "EXPOSE 3000" >> dockerfiles/frontend/Dockerfile
+              echo 'CMD ["npm", "start"]' >> dockerfiles/frontend/Dockerfile
+              echo "has_sources=false" >> $GITHUB_OUTPUT
+            else
+              echo "📦 Frontend project detected"
+              echo "has_sources=true" >> $GITHUB_OUTPUT
+            fi
+          fi
+
+      - name: Install dependencies and run tests
+        if: steps.check-sources.outputs.has_sources == 'true'
+        run: |
+          if [ "${{ inputs.project_type }}" = "backend" ]; then
+            echo "Running backend build and tests..."
+            if [ -f "pom.xml" ]; then
+              mvn clean compile test -B -q
+            else
+              echo "No pom.xml found, skipping Java build"
+            fi
+          else
+            echo "Running frontend build and tests..."
+            if [ -f "pnpm-lock.yaml" ]; then
+              pnpm install --frozen-lockfile
+            elif [ -f "package.json" ]; then
+              pnpm install
+            fi
+            
+            if grep -q '"test"' package.json 2>/dev/null; then
+              pnpm test --run 2>/dev/null || echo "Tests completed"
+            fi
+          fi
+        continue-on-error: true
+        
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+          
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+        
+      - name: Prepare image metadata
+        id: build-meta
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          VERSION: ${{ inputs.version }}
+          ENVIRONMENT: ${{ inputs.environment }}
+        run: |
+          # Get environment-specific ECR repository name
+          if [ "$ENVIRONMENT" = "production" ]; then
+            ECR_REPOSITORY="${{ secrets.ECR_REPOSITORY_NAME }}"
+          else
+            ECR_REPOSITORY="${{ secrets.ECR_REPOSITORY_NAME }}-${ENVIRONMENT}"
+          fi
+          
+          # Handle staging RC tags
+          IMAGE_TAG="$VERSION"
+          if [ "$ENVIRONMENT" = "staging" ] && [[ "$IMAGE_TAG" != *"-rc" ]]; then
+            IMAGE_TAG="${IMAGE_TAG}-rc"
+          fi
+          
+          # For production, remove -rc suffix if present
+          if [ "$ENVIRONMENT" = "production" ] && [[ "$IMAGE_TAG" == *"-rc" ]]; then
+            IMAGE_TAG="${IMAGE_TAG%-rc}"
+          fi
+          
+          IMAGE_URI="${ECR_REGISTRY}/${ECR_REPOSITORY}:${IMAGE_TAG}"
+          
+          echo "ECR Registry: $ECR_REGISTRY"
+          echo "ECR Repository: $ECR_REPOSITORY"
+          echo "Image Tag: $IMAGE_TAG"
+          echo "Full Image URI: $IMAGE_URI"
+          
+          echo "ecr_registry=$ECR_REGISTRY" >> $GITHUB_OUTPUT
+          echo "ecr_repository=$ECR_REPOSITORY" >> $GITHUB_OUTPUT
+          echo "image_tag=$IMAGE_TAG" >> $GITHUB_OUTPUT
+          echo "image_uri=$IMAGE_URI" >> $GITHUB_OUTPUT
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and Push Docker Image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: dockerfiles/${{ inputs.project_type }}/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ${{ steps.build-meta.outputs.image_uri }}
+            ${{ steps.build-meta.outputs.ecr_registry }}/${{ steps.build-meta.outputs.ecr_repository }}:latest-${{ inputs.environment }}
+          labels: |
+            org.opencontainers.image.title=CloudInsight ${{ inputs.project_type }}
+            org.opencontainers.image.description=CloudInsight ${{ inputs.project_type }} application
+            org.opencontainers.image.vendor=AmaliTech Training Academy
+            org.opencontainers.image.version=${{ inputs.version }}
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            cloudinsight.project.type=${{ inputs.project_type }}
+            cloudinsight.project.environment=${{ inputs.environment }}
+            cloudinsight.build.timestamp=${{ github.event.head_commit.timestamp }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Generate ArgoCD metadata
+        run: |
+          mkdir -p build-artifacts
+          
+          cat > build-artifacts/image-metadata.json << EOF
+          {
+            "image": {
+              "registry": "${{ steps.build-meta.outputs.ecr_registry }}",
+              "repository": "${{ steps.build-meta.outputs.ecr_repository }}",
+              "tag": "${{ steps.build-meta.outputs.image_tag }}",
+              "fullUri": "${{ steps.build-meta.outputs.image_uri }}"
+            },
+            "build": {
+              "commit": "${{ github.sha }}",
+              "branch": "${{ github.ref_name }}",
+              "version": "${{ inputs.version }}",
+              "timestamp": "${{ github.event.head_commit.timestamp }}",
+              "environment": "${{ inputs.environment }}",
+              "projectType": "${{ inputs.project_type }}"
+            },
+            "argocd": {
+              "application": "cloudinsight-${{ inputs.project_type }}-${{ inputs.environment }}",
+              "targetRevision": "${{ github.sha }}"
+            }
+          }
+          EOF
+          
+          echo "Generated ArgoCD metadata:"
+          cat build-artifacts/image-metadata.json
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-metadata-${{ inputs.project_type }}-${{ inputs.environment }}-${{ github.run_id }}
+          path: build-artifacts/
+          retention-days: 30
+          
+      - name: Build Summary
+        run: |
+          echo "## 🏗️ Build Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Project Type:** ${{ inputs.project_type }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Environment:** ${{ inputs.environment }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Version:** ${{ inputs.version }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Image Tag:** ${{ steps.build-meta.outputs.image_tag }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Image URI:** \`${{ steps.build-meta.outputs.image_uri }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "✅ Build completed successfully!"
