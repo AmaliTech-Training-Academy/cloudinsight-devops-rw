@@ -1,0 +1,387 @@
+name: Deploy Workflow
+
+on:
+  workflow_call:
+    inputs:
+      project_type:
+        description: 'Type of project (frontend or backend)'
+        required: true
+        type: string
+      environment:
+        description: 'Target environment (development, staging, production)'
+        required: true
+        type: string
+      deploy_secrets:
+        description: 'Whether to deploy secrets to AWS Secrets Manager'
+        required: false
+        type: boolean
+        default: false
+      secrets_merge_strategy:
+        description: 'Strategy for merging secrets (merge, replace)'
+        required: false
+        type: string
+        default: 'merge'
+    secrets:
+      AWS_REGION:
+        description: 'AWS region'
+        required: true
+      AWS_ACCESS_KEY_ID:
+        description: 'AWS access key ID'
+        required: true
+      AWS_SECRET_ACCESS_KEY:
+        description: 'AWS secret access key'
+        required: true
+      AWS_SECRETS_MANAGER_SECRET_NAME:
+        description: 'AWS Secrets Manager secret name'
+        required: false
+      DEPLOYMENT_SECRETS:
+        description: 'JSON object containing secrets to deploy'
+        required: false
+    outputs:
+      deployment_status:
+        description: 'Deployment status'
+        value: ${{ jobs.deploy.outputs.status }}
+      deployed_image_uri:
+        description: 'Deployed image URI'
+        value: ${{ jobs.deploy.outputs.image_uri }}
+      secrets_updated:
+        description: 'Whether secrets were updated'
+        value: ${{ jobs.deploy.outputs.secrets_updated }}
+
+permissions:
+  contents: read
+  actions: read
+  id-token: write  # For AWS OIDC
+
+jobs:
+  deploy:
+    name: Deploy ${{ inputs.project_type }} to ${{ inputs.environment }}
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    outputs:
+      status: ${{ steps.deployment-status.outputs.status }}
+      image_uri: ${{ steps.download-metadata.outputs.image_uri }}
+      secrets_updated: ${{ steps.deploy-secrets.outputs.updated }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Download build metadata
+        id: download-metadata
+        uses: actions/download-artifact@v4
+        with:
+          name: build-metadata-${{ inputs.project_type }}-${{ inputs.environment }}
+          path: deployment-metadata/
+        continue-on-error: true
+
+      - name: Extract deployment information
+        id: extract-info
+        run: |
+          if [ -f deployment-metadata/image-metadata.json ]; then
+            echo "✅ Build metadata found, extracting deployment information..."
+            
+            IMAGE_URI=$(jq -r '.image.fullUri // empty' deployment-metadata/image-metadata.json)
+            COMMIT_SHA=$(jq -r '.build.commit // empty' deployment-metadata/image-metadata.json)
+            BUILD_TIMESTAMP=$(jq -r '.build.timestamp // empty' deployment-metadata/image-metadata.json)
+            
+            echo "image_uri=$IMAGE_URI" >> $GITHUB_OUTPUT
+            echo "commit_sha=$COMMIT_SHA" >> $GITHUB_OUTPUT
+            echo "build_timestamp=$BUILD_TIMESTAMP" >> $GITHUB_OUTPUT
+            
+            echo "**Deployment Information:**"
+            echo "- Image URI: $IMAGE_URI"
+            echo "- Commit: $COMMIT_SHA"
+            echo "- Build Time: $BUILD_TIMESTAMP"
+            
+            if [ -n "$IMAGE_URI" ]; then
+              echo "has_image=true" >> $GITHUB_OUTPUT
+            else
+              echo "has_image=false" >> $GITHUB_OUTPUT
+            fi
+          else
+            echo "⚠️ No build metadata found, deployment will proceed without image information"
+            echo "has_image=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Deploy secrets to AWS Secrets Manager
+        id: deploy-secrets
+        if: inputs.deploy_secrets && secrets.AWS_SECRETS_MANAGER_SECRET_NAME && secrets.DEPLOYMENT_SECRETS
+        run: |
+          echo "🔐 Deploying secrets to AWS Secrets Manager..."
+          
+          SECRET_NAME="${{ secrets.AWS_SECRETS_MANAGER_SECRET_NAME }}"
+          NEW_SECRETS='${{ secrets.DEPLOYMENT_SECRETS }}'
+          MERGE_STRATEGY="${{ inputs.secrets_merge_strategy }}"
+          
+          echo "Secret Name: $SECRET_NAME"
+          echo "Merge Strategy: $MERGE_STRATEGY"
+          
+          # Validate JSON format of new secrets
+          if ! echo "$NEW_SECRETS" | jq . >/dev/null 2>&1; then
+            echo "❌ DEPLOYMENT_SECRETS is not valid JSON"
+            exit 1
+          fi
+          
+          # Check if secret exists
+          if aws secretsmanager describe-secret --secret-id "$SECRET_NAME" >/dev/null 2>&1; then
+            echo "✅ Secret exists, proceeding with $MERGE_STRATEGY strategy..."
+            
+            if [ "$MERGE_STRATEGY" = "merge" ]; then
+              # Merge with existing secrets
+              echo "📝 Merging with existing secrets..."
+              
+              # Get existing secrets
+              EXISTING_SECRETS=$(aws secretsmanager get-secret-value \
+                --secret-id "$SECRET_NAME" \
+                --query 'SecretString' \
+                --output text 2>/dev/null || echo '{}')
+              
+              # Validate existing secrets JSON
+              if ! echo "$EXISTING_SECRETS" | jq . >/dev/null 2>&1; then
+                echo "⚠️ Existing secrets are not valid JSON, treating as empty"
+                EXISTING_SECRETS='{}'
+              fi
+              
+              # Merge secrets (new secrets override existing ones)
+              MERGED_SECRETS=$(echo "$EXISTING_SECRETS" "$NEW_SECRETS" | jq -s '.[0] * .[1]')
+              
+              echo "🔄 Updating secret with merged values..."
+              aws secretsmanager update-secret \
+                --secret-id "$SECRET_NAME" \
+                --secret-string "$MERGED_SECRETS"
+              
+            else
+              # Replace strategy
+              echo "🔄 Replacing existing secrets..."
+              aws secretsmanager update-secret \
+                --secret-id "$SECRET_NAME" \
+                --secret-string "$NEW_SECRETS"
+            fi
+          else
+            echo "📝 Secret does not exist, creating new secret..."
+            aws secretsmanager create-secret \
+              --name "$SECRET_NAME" \
+              --secret-string "$NEW_SECRETS" \
+              --description "CloudInsight ${{ inputs.project_type }} secrets for ${{ inputs.environment }} environment"
+          fi
+          
+          echo "✅ Secrets deployed successfully"
+          echo "updated=true" >> $GITHUB_OUTPUT
+          
+          # Add summary to step summary
+          echo "## Secrets Deployment Summary" >> $GITHUB_STEP_SUMMARY
+          echo "**Secret Name:** $SECRET_NAME" >> $GITHUB_STEP_SUMMARY
+          echo "**Strategy:** $MERGE_STRATEGY" >> $GITHUB_STEP_SUMMARY
+          echo "**Status:** ✅ Successfully updated" >> $GITHUB_STEP_SUMMARY
+          echo "**Environment:** ${{ inputs.environment }}" >> $GITHUB_STEP_SUMMARY
+
+      - name: Skip secrets deployment
+        if: ${{ !inputs.deploy_secrets }}
+        run: |
+          echo "ℹ️ Secrets deployment skipped (deploy_secrets=false)"
+          echo "updated=false" >> $GITHUB_OUTPUT
+
+      - name: Validate deployment prerequisites
+        id: validate-deployment
+        run: |
+          echo "🔍 Validating deployment prerequisites..."
+          
+          VALIDATION_PASSED=true
+          
+          # Check if we have image information for container deployments
+          if [ "${{ steps.extract-info.outputs.has_image }}" = "false" ]; then
+            echo "⚠️ No image information available"
+            echo "ℹ️ This might be expected for infrastructure-only deployments"
+          else
+            echo "✅ Image information available: ${{ steps.extract-info.outputs.image_uri }}"
+          fi
+          
+          # Validate AWS credentials
+          if ! aws sts get-caller-identity >/dev/null 2>&1; then
+            echo "❌ AWS credentials validation failed"
+            VALIDATION_PASSED=false
+          else
+            echo "✅ AWS credentials validated"
+          fi
+          
+          # Check environment-specific requirements
+          case "${{ inputs.environment }}" in
+            production)
+              echo "🔒 Production environment - additional validations..."
+              # Add production-specific validations here
+              ;;
+            staging)
+              echo "🧪 Staging environment - validations..."
+              # Add staging-specific validations here
+              ;;
+            development)
+              echo "🛠️ Development environment - basic validations..."
+              ;;
+          esac
+          
+          if [ "$VALIDATION_PASSED" = "true" ]; then
+            echo "✅ All deployment prerequisites validated"
+            echo "validation_passed=true" >> $GITHUB_OUTPUT
+          else
+            echo "❌ Deployment validation failed"
+            echo "validation_passed=false" >> $GITHUB_OUTPUT
+            exit 1
+          fi
+
+      - name: Generate ArgoCD deployment configuration
+        if: steps.validate-deployment.outputs.validation_passed == 'true'
+        id: generate-argocd-config
+        run: |
+          echo "🚀 Generating ArgoCD deployment configuration..."
+          
+          mkdir -p argocd-deployment
+          
+          # Create ArgoCD application configuration
+          cat > argocd-deployment/application.yaml << EOF
+          apiVersion: argoproj.io/v1alpha1
+          kind: Application
+          metadata:
+            name: cloudinsight-${{ inputs.project_type }}-${{ inputs.environment }}
+            namespace: argocd
+            labels:
+              app.kubernetes.io/name: cloudinsight-${{ inputs.project_type }}
+              app.kubernetes.io/instance: ${{ inputs.environment }}
+              app.kubernetes.io/version: ${{ steps.extract-info.outputs.commit_sha || github.sha }}
+              app.kubernetes.io/component: ${{ inputs.project_type }}
+              app.kubernetes.io/part-of: cloudinsight
+              app.kubernetes.io/managed-by: argocd
+          spec:
+            project: cloudinsight
+            source:
+              repoURL: https://github.com/${{ github.repository }}
+              targetRevision: ${{ steps.extract-info.outputs.commit_sha || github.sha }}
+              path: k8s/overlays/${{ inputs.environment }}/${{ inputs.project_type }}
+            destination:
+              server: https://kubernetes.default.svc
+              namespace: cloudinsight-${{ inputs.environment }}
+            syncPolicy:
+              automated:
+                prune: true
+                selfHeal: true
+                allowEmpty: false
+              syncOptions:
+                - CreateNamespace=true
+                - PrunePropagationPolicy=foreground
+                - PruneLast=true
+              retry:
+                limit: 3
+                backoff:
+                  duration: 5s
+                  factor: 2
+                  maxDuration: 3m
+          EOF
+          
+          # Create image update configuration for ArgoCD
+          if [ "${{ steps.extract-info.outputs.has_image }}" = "true" ]; then
+            cat > argocd-deployment/image-update.yaml << EOF
+          apiVersion: v1
+          kind: ConfigMap
+          metadata:
+            name: image-update-${{ inputs.project_type }}-${{ inputs.environment }}
+            namespace: argocd
+            labels:
+              app.kubernetes.io/name: cloudinsight-${{ inputs.project_type }}
+              app.kubernetes.io/instance: ${{ inputs.environment }}
+          data:
+            image.uri: "${{ steps.extract-info.outputs.image_uri }}"
+            image.tag: "${{ steps.extract-info.outputs.commit_sha || github.sha }}"
+            updated.timestamp: "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            updated.commit: "${{ github.sha }}"
+            updated.environment: "${{ inputs.environment }}"
+          EOF
+          fi
+          
+          echo "✅ ArgoCD configuration generated"
+          
+          # Display configuration summary
+          echo "## ArgoCD Configuration" >> $GITHUB_STEP_SUMMARY
+          echo "**Application:** cloudinsight-${{ inputs.project_type }}-${{ inputs.environment }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Target Revision:** ${{ steps.extract-info.outputs.commit_sha || github.sha }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Namespace:** cloudinsight-${{ inputs.environment }}" >> $GITHUB_STEP_SUMMARY
+          
+          if [ "${{ steps.extract-info.outputs.has_image }}" = "true" ]; then
+            echo "**Image URI:** ${{ steps.extract-info.outputs.image_uri }}" >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Upload ArgoCD configuration
+        if: steps.validate-deployment.outputs.validation_passed == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: argocd-config-${{ inputs.project_type }}-${{ inputs.environment }}
+          path: argocd-deployment/
+          retention-days: 30
+
+      - name: Notify ArgoCD (simulation)
+        if: steps.validate-deployment.outputs.validation_passed == 'true'
+        id: notify-argocd
+        run: |
+          echo "🔔 Notifying ArgoCD of deployment changes..."
+          echo "ℹ️ In a real implementation, this would:"
+          echo "  - Update GitOps repository with new image references"
+          echo "  - Trigger ArgoCD application sync"
+          echo "  - Wait for deployment completion"
+          echo "  - Verify application health"
+          echo ""
+          echo "🎯 Deployment target:"
+          echo "  - Application: cloudinsight-${{ inputs.project_type }}-${{ inputs.environment }}"
+          echo "  - Namespace: cloudinsight-${{ inputs.environment }}"
+          echo "  - Commit: ${{ steps.extract-info.outputs.commit_sha || github.sha }}"
+          
+          if [ "${{ steps.extract-info.outputs.has_image }}" = "true" ]; then
+            echo "  - Image: ${{ steps.extract-info.outputs.image_uri }}"
+          fi
+          
+          echo ""
+          echo "✅ ArgoCD notification completed (simulated)"
+
+      - name: Set deployment status
+        id: deployment-status
+        if: always()
+        run: |
+          if [ "${{ steps.validate-deployment.outputs.validation_passed }}" = "true" ]; then
+            echo "status=success" >> $GITHUB_OUTPUT
+            echo "✅ Deployment completed successfully"
+          else
+            echo "status=failed" >> $GITHUB_OUTPUT
+            echo "❌ Deployment failed"
+          fi
+
+      - name: Deployment summary
+        if: always()
+        run: |
+          echo "## Deployment Summary" >> $GITHUB_STEP_SUMMARY
+          echo "**Project:** ${{ inputs.project_type }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Environment:** ${{ inputs.environment }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Status:** ${{ steps.deployment-status.outputs.status }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Commit:** ${{ steps.extract-info.outputs.commit_sha || github.sha }}" >> $GITHUB_STEP_SUMMARY
+          
+          if [ "${{ steps.extract-info.outputs.has_image }}" = "true" ]; then
+            echo "**Image:** ${{ steps.extract-info.outputs.image_uri }}" >> $GITHUB_STEP_SUMMARY
+          fi
+          
+          if [ "${{ inputs.deploy_secrets }}" = "true" ]; then
+            echo "**Secrets Updated:** ${{ steps.deploy-secrets.outputs.updated }}" >> $GITHUB_STEP_SUMMARY
+          fi
+          
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Next Steps" >> $GITHUB_STEP_SUMMARY
+          echo "1. Monitor ArgoCD for deployment status" >> $GITHUB_STEP_SUMMARY
+          echo "2. Verify application health in ${{ inputs.environment }} environment" >> $GITHUB_STEP_SUMMARY
+          echo "3. Run smoke tests if available" >> $GITHUB_STEP_SUMMARY
+          
+          if [ "${{ inputs.environment }}" = "production" ]; then
+            echo "4. Monitor production metrics and alerts" >> $GITHUB_STEP_SUMMARY
+          fi

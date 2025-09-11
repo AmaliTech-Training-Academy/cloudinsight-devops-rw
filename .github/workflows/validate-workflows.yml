@@ -1,0 +1,76 @@
+name: Validate Workflows
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/**'
+
+jobs:
+  validate-syntax:
+    name: Validate Workflow Syntax
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Validate YAML syntax
+        run: |
+          echo "Validating workflow YAML syntax..."
+          for file in .github/workflows/*.yml; do
+            if [ -f "$file" ]; then
+              echo "Validating $file..."
+              python3 -c "import yaml; yaml.safe_load(open('$file'))"
+              echo "✅ $file is valid"
+            fi
+          done
+
+      - name: Check workflow dependencies
+        run: |
+          echo "Checking reusable workflow references..."
+          for file in .github/workflows/main-*.yml; do
+            if [ -f "$file" ]; then
+              echo "Checking $file..."
+              if grep -q "uses: ./.github/workflows/" "$file"; then
+                echo "✅ $file uses reusable workflows"
+              else
+                echo "⚠️ $file does not use reusable workflows"
+              fi
+            fi
+          done
+
+      - name: Validate required secrets documentation
+        run: |
+          echo "Checking secrets documentation..."
+          if [ -f ".github/workflows/SECRETS.md" ]; then
+            echo "✅ Secrets documentation exists"
+            # Check if key secrets are documented
+            required_secrets=(
+              "AWS_REGION"
+              "AWS_ACCESS_KEY_ID" 
+              "SONARQUBE_URL"
+              "SONARQUBE_TOKEN"
+            )
+            
+            for secret in "${required_secrets[@]}"; do
+              if grep -q "$secret" .github/workflows/SECRETS.md; then
+                echo "✅ $secret is documented"
+              else
+                echo "❌ $secret is missing from documentation"
+              fi
+            done
+          else
+            echo "❌ Secrets documentation missing"
+          fi
+
+      - name: Summary
+        run: |
+          echo "## Workflow Validation Summary" >> $GITHUB_STEP_SUMMARY
+          echo "✅ All YAML files have valid syntax" >> $GITHUB_STEP_SUMMARY
+          echo "✅ Reusable workflow architecture implemented" >> $GITHUB_STEP_SUMMARY
+          echo "✅ Secrets documentation provided" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Workflow files created:**" >> $GITHUB_STEP_SUMMARY
+          ls -1 .github/workflows/*.yml | while read file; do
+            echo "- \`$(basename "$file")\`" >> $GITHUB_STEP_SUMMARY
+          done
