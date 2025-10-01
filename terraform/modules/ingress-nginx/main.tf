@@ -13,6 +13,17 @@ locals {
       service = {
         annotations = local.service_annotations
       }
+      metrics = {
+        enabled = var.metrics_enabled
+        port    = var.metrics_port
+        service = {
+          annotations = {
+            "prometheus.io/scrape" = "true"
+            "prometheus.io/port"   = tostring(var.metrics_port)
+            "prometheus.io/path"   = "/metrics"
+          }
+        }
+      }
     }
   })
 }
@@ -30,3 +41,6 @@ resource "helm_release" "this" {
 output "release_name" { value = helm_release.this.name }
 output "namespace" { value = helm_release.this.namespace }
 output "chart_version" { value = helm_release.this.version }
+output "metrics_enabled" { value = var.metrics_enabled }
+output "metrics_port" { value = var.metrics_port }
+output "metrics_path" { value = "/metrics" }

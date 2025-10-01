@@ -13,3 +13,6 @@ module "ingress_nginx" {
 output "release_name" { value = module.ingress_nginx.release_name }
 output "namespace" { value = module.ingress_nginx.namespace }
 output "chart_version" { value = module.ingress_nginx.chart_version }
+output "metrics_enabled" { value = module.ingress_nginx.metrics_enabled }
+output "metrics_port" { value = module.ingress_nginx.metrics_port }
+output "metrics_path" { value = module.ingress_nginx.metrics_path }

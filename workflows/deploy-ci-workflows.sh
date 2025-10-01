@@ -17,16 +17,27 @@ ORG="AmaliTech-Training-Academy"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FRONTEND_CI_FILE="$SCRIPT_DIR/frontend/ci.yml"
 BACKEND_CI_FILE="$SCRIPT_DIR/backend/ci.yml"
+BACKEND_NO_TESTS_CI_FILE="$SCRIPT_DIR/backend/ci-no-tests.yml"
 TEMP_DIR="/tmp/ci-deployment-$$"
-BRANCHES=("development" "staging" "production")
+BRANCHES=("main")
+
+# Infrastructure services that don't need tests
+INFRASTRUCTURE_SERVICES=(
+    "cloudinsight-api-gateway-rw"
+    "cloudinsight-service-discovery-rw"
+    "cloudinsight-config-server-rw"
+)
 
 # Default repository list with types
 # Format: "repo-name:type" where type is either "frontend" or "backend"
 REPOS=(
     # Frontend repositories
-    "cloudinsight-frontend-rw:frontend"
+    # "cloudinsight-frontend-rw:frontend"
     
-    # Backend repositories  
+    # Backend repositories
+    "cloudinsight-api-gateway-rw:backend"
+    "cloudinsight-service-discovery-rw:backend"
+    # "cloudinsight-config-server-rw:backend"
     # "cloudinsight-user-service-rw:backend"
     # "cloudinsight-cost-service-rw:backend"
     # "cloudinsight-metric-service-rw:backend"
@@ -95,6 +106,11 @@ check_prerequisites() {
         exit 1
     fi
     
+    if [[ ! -f "$BACKEND_NO_TESTS_CI_FILE" ]]; then
+        log_error "Backend no-tests CI file not found at: $BACKEND_NO_TESTS_CI_FILE"
+        exit 1
+    fi
+    
     log_success "All prerequisites satisfied"
 }
 
@@ -117,14 +133,32 @@ parse_repo_input() {
     return 0
 }
 
+# Check if repository is an infrastructure service
+is_infrastructure_service() {
+    local repo_name="$1"
+    
+    for infra_service in "${INFRASTRUCTURE_SERVICES[@]}"; do
+        if [[ "$repo_name" == "$infra_service" ]]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
 # Get the appropriate CI file based on repository type
 get_ci_file() {
     local repo_type="$1"
+    local repo_name="$2"
     
     if [[ "$repo_type" == "frontend" ]]; then
         echo "$FRONTEND_CI_FILE"
     elif [[ "$repo_type" == "backend" ]]; then
-        echo "$BACKEND_CI_FILE"
+        # Check if this is an infrastructure service
+        if is_infrastructure_service "$repo_name"; then
+            echo "$BACKEND_NO_TESTS_CI_FILE"
+        else
+            echo "$BACKEND_CI_FILE"
+        fi
     else
         log_error "Unknown repository type: $repo_type"
         return 1
@@ -264,11 +298,16 @@ deploy_to_repository() {
     log_success "Repository $repo_name found"
     
     # Get CI file for this repository type
-    if ! ci_file=$(get_ci_file "$repo_type"); then
+    if ! ci_file=$(get_ci_file "$repo_type" "$repo_name"); then
         return 1
     fi
     
-    log_info "Using CI file: $(basename "$ci_file")"
+    # Determine CI file type for logging
+    if [[ "$ci_file" == *"ci-no-tests.yml" ]]; then
+        log_info "Using CI file: $(basename "$ci_file") (infrastructure service - no tests)"
+    else
+        log_info "Using CI file: $(basename "$ci_file")"
+    fi
     
     # Get default branch
     default_branch=$(get_default_branch "$repo_name")

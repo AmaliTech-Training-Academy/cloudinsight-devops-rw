@@ -1,10 +1,12 @@
-name: Frontend CI with Docker Multi-Platform Build
+---
+name: Frontend CI with Docker Multi-Platform Build and Deployment
 
 # Principle of least privilege for GITHUB_TOKEN
 permissions:
-  contents: read
+  contents: write
   checks: write # needed for test reporter annotations
   actions: read
+  id-token: write
 
 concurrency:
   group: frontend-ci-${{ github.ref }}
@@ -173,10 +175,10 @@ jobs:
         run: |
           echo "🔍 Checking for encrypted environment files..."
 
-          # Setup cleanup trap for any exit (success or failure)
+          # Setup cleanup trap for any exit (success or failure) - but preserve .env for deployment
           cleanup() {
             echo "🧹 Performing security cleanup..."
-            rm -f ./team-private-key.pem ./temp-aes-key ./.env ./next-public-build-args.txt
+            rm -f ./team-private-key.pem ./temp-aes-key ./next-public-build-args.txt
             echo "✅ Security cleanup completed"
           }
           trap cleanup EXIT
@@ -315,6 +317,160 @@ jobs:
 
           echo "🔒 Environment variables prepared for Docker build (values masked in logs)"
 
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Deploy environment variables to AWS Secrets Manager
+        if: steps.decrypt-env.outputs.has_encrypted_env == 'true'
+        run: |
+          echo "🚀 Deploying environment variables to AWS Secrets Manager..."
+
+          # Verify .env file exists
+          if [[ ! -f ./.env ]]; then
+            echo "❌ .env file not found! This should not happen if decryption succeeded."
+            exit 1
+          fi
+
+          SECRET_NAME="${{ secrets.AWS_SECRET_NAME_FRONTEND }}"
+          if [[ -z "$SECRET_NAME" ]]; then
+            echo "❌ AWS_SECRET_NAME_FRONTEND secret not configured"
+            exit 1
+          fi
+
+          # Remove database secrets from .env before processing (for consistency)
+          echo "🚫 Removing database secrets (DB_PASSWORD, DB_URL, DB_USERNAME) from environment variables..."
+          sed -i '/^DB_PASSWORD=/d; /^DB_URL=/d; /^DB_USERNAME=/d' .env
+
+          echo "📊 Remaining environment variables after database secret exclusion:"
+          grep -c "^[^#].*=" .env || echo "0"
+
+          # Check if secret exists
+          if aws secretsmanager describe-secret --secret-id "$SECRET_NAME" >/dev/null 2>&1; then
+            echo "✅ Secret exists, updating with merge strategy..."
+            
+            # Get existing secret
+            EXISTING_SECRET=$(aws secretsmanager get-secret-value --secret-id "$SECRET_NAME" --query SecretString --output text)
+            
+            # Create temporary files for merging
+            echo "$EXISTING_SECRET" > /tmp/existing.json
+            
+            # Create JSON from .env file
+            echo "{" > /tmp/new_vars.json
+            while IFS='=' read -r key value || [ -n "$key" ]; do
+              # Skip empty lines and comment lines
+              if [[ -z "$key" || "$key" =~ ^[[:space:]]*# ]]; then
+                continue
+              fi
+              
+              # Remove inline comments from value (everything after # including the #)
+              value=$(echo "$value" | sed 's/[[:space:]]*#.*$//')
+              
+              if [[ -n "$key" && -n "$value" ]]; then
+                # Escape quotes in value and add to JSON
+                escaped_value=$(echo "$value" | sed 's/"/\\"/g')
+                echo "  \"$key\": \"$escaped_value\"," >> /tmp/new_vars.json
+              fi
+            done < .env
+            # Remove trailing comma and close JSON
+            sed -i '$ s/,$//' /tmp/new_vars.json
+            echo "}" >> /tmp/new_vars.json
+            
+            # Merge with existing secret using jq
+            jq -s '.[0] * .[1]' /tmp/existing.json /tmp/new_vars.json > /tmp/merged.json
+            
+            # Update secret with merged values
+            aws secretsmanager update-secret \
+              --secret-id "$SECRET_NAME" \
+              --secret-string file:///tmp/merged.json
+            
+            echo "✅ Secret updated successfully with merge strategy"
+          else
+            echo "🆕 Creating new secret..."
+            
+            # Convert .env to JSON
+            echo "{" > /tmp/new.json
+            while IFS='=' read -r key value || [ -n "$key" ]; do
+              # Skip empty lines and comment lines
+              if [[ -z "$key" || "$key" =~ ^[[:space:]]*# ]]; then
+                continue
+              fi
+              
+              # Remove inline comments from value (everything after # including the #)
+              value=$(echo "$value" | sed 's/[[:space:]]*#.*$//')
+              
+              if [[ -n "$key" && -n "$value" ]]; then
+                # Escape quotes in value and add to JSON
+                escaped_value=$(echo "$value" | sed 's/"/\\"/g')
+                echo "  \"$key\": \"$escaped_value\"," >> /tmp/new.json
+              fi
+            done < .env
+            # Remove trailing comma and close JSON
+            sed -i '$ s/,$//' /tmp/new.json
+            echo "}" >> /tmp/new.json
+            
+            # Create new secret
+            aws secretsmanager create-secret \
+              --name "$SECRET_NAME" \
+              --description "Frontend environment variables for ${{ github.repository }}" \
+              --secret-string file:///tmp/new.json
+            
+            echo "✅ Secret created successfully"
+          fi
+
+          # Cleanup
+          rm -f /tmp/existing.json /tmp/merged.json /tmp/new.json /tmp/new_vars.json
+
+          echo "🔐 Environment variables deployed to AWS Secrets Manager: $SECRET_NAME"
+          echo "🚫 Database secrets (DB_PASSWORD, DB_URL, DB_USERNAME) excluded from deployment"
+
+      - name: Login to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Calculate next semantic version
+        id: semver
+        run: |
+          echo "🏷️ Calculating next semantic version for branch: ${{ github.ref_name }}"
+          BRANCH_NAME="${{ github.ref_name }}"
+
+          # Get the latest tag from the current branch with branch suffix
+          LATEST_TAG=$(git tag -l --sort=-version:refname "v*-${BRANCH_NAME}" | head -1 || echo "")
+
+          if [[ -z "$LATEST_TAG" ]]; then
+            # If no branch-specific tag, look for any v* tag for this branch's starting point
+            LATEST_TAG=$(git describe --tags --abbrev=0 --match="v*" 2>/dev/null || echo "v0.0.0")
+            # Remove any branch suffix if it exists
+            LATEST_TAG=$(echo "$LATEST_TAG" | sed 's/-[^-]*$//')
+          else
+            # Remove the branch suffix to get the version number
+            LATEST_TAG=$(echo "$LATEST_TAG" | sed 's/-[^-]*$//')
+          fi
+
+          echo "Latest tag found: $LATEST_TAG"
+
+          # Extract version numbers
+          if [[ $LATEST_TAG =~ ^v([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
+            MAJOR=${BASH_REMATCH[1]}
+            MINOR=${BASH_REMATCH[2]}
+            PATCH=${BASH_REMATCH[3]}
+            echo "Found existing version: v${MAJOR}.${MINOR}.${PATCH}"
+            # Increment patch version
+            PATCH=$((PATCH + 1))
+          else
+            echo "No semantic version tag found, starting with v0.1.0"
+            MAJOR=0
+            MINOR=1
+            PATCH=0
+          fi
+
+          NEXT_VERSION="v${MAJOR}.${MINOR}.${PATCH}"
+
+          echo "Next version: $NEXT_VERSION"
+          echo "version=$NEXT_VERSION" >> $GITHUB_OUTPUT
+          echo "version_no_v=${MAJOR}.${MINOR}.${PATCH}" >> $GITHUB_OUTPUT
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
         with:
@@ -356,14 +512,16 @@ jobs:
           done
           echo "✅ Required npm scripts verified"
 
-      # Step 3: Build Docker image only after fast checks succeed
-      - name: Build multi-platform Docker image
+      # Step 3: Build and push Docker image to ECR only after fast checks succeed
+      - name: Build and push multi-platform Docker image to ECR
         run: |
-          echo "🏗️ Building Docker image with environment variables (post-tests)..."
+          echo "🏗️ Building and pushing Docker image with environment variables (post-tests)..."
 
           BUILD_CMD="docker buildx build --platform linux/amd64,linux/arm64"
           BUILD_CMD="$BUILD_CMD --cache-from type=gha --cache-to type=gha,mode=max"
-          BUILD_CMD="$BUILD_CMD -t cloudinsight-frontend:latest -t cloudinsight-frontend:${{ github.sha }}"
+          BUILD_CMD="$BUILD_CMD --push"
+          BUILD_CMD="$BUILD_CMD -t ${{ secrets.ECR_REGISTRY }}/${{ secrets.ECR_REPOSITORY_FRONTEND }}:${{ steps.semver.outputs.version }}"
+          BUILD_CMD="$BUILD_CMD -t ${{ secrets.ECR_REGISTRY }}/${{ secrets.ECR_REPOSITORY_FRONTEND }}:latest"
 
           if [[ "${{ steps.extract-env.outputs.has_next_public_vars }}" == "true" && -f "./next-public-build-args.txt" ]]; then
             echo "🔒 Adding NEXT_PUBLIC_* environment variables as build arguments..."
@@ -378,9 +536,38 @@ jobs:
           fi
 
           BUILD_CMD="$BUILD_CMD ."
-          echo "🚀 Executing Docker build..."
+          echo "🚀 Executing Docker build and push to ECR..."
           eval "$BUILD_CMD"
-          echo "✅ Docker image built successfully with environment variables"
+          echo "✅ Docker image built and pushed successfully to ECR with environment variables"
+
+      - name: Create and push git tag
+        if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/development' || github.ref == 'refs/heads/staging' || github.ref == 'refs/heads/production')
+        run: |
+          # Extract branch name for tag prefix
+          BRANCH_NAME="${{ github.ref_name }}"
+          echo "🏷️ Creating and pushing git tag for branch: $BRANCH_NAME"
+          echo "📝 Version: ${{ steps.semver.outputs.version }}"
+
+          # Configure git with GitHub token
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+
+          # Create branch-specific tag
+          TAG_NAME="${{ steps.semver.outputs.version }}-${BRANCH_NAME}"
+
+          # Check if tag already exists
+          if git tag -l "$TAG_NAME" | grep -q "$TAG_NAME"; then
+            echo "⚠️ Tag $TAG_NAME already exists, skipping"
+            exit 0
+          fi
+
+          # Create annotated tag with branch info
+          git tag -a "$TAG_NAME" -m "Frontend release ${{ steps.semver.outputs.version }} from branch $BRANCH_NAME"
+
+          # Push tag with authentication
+          git push https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git "$TAG_NAME"
+
+          echo "✅ Tag $TAG_NAME created and pushed successfully"
 
       - name: Check for environment example
         run: |
@@ -394,7 +581,13 @@ jobs:
         run: |
           echo "🎉 All CI checks passed successfully!"
           echo "✅ Project structure validated"
-          echo "✅ Multi-platform Docker image built"
+          echo "✅ Multi-platform Docker image built and pushed to ECR"
+          if [[ "${{ steps.decrypt-env.outputs.has_encrypted_env }}" == "true" ]]; then
+            echo "✅ Environment variables deployed to AWS Secrets Manager"
+          fi
+          if [[ "${{ github.event_name }}" == "push" && ("${{ github.ref }}" == "refs/heads/main" || "${{ github.ref }}" == "refs/heads/development" || "${{ github.ref }}" == "refs/heads/staging" || "${{ github.ref }}" == "refs/heads/production") ]]; then
+            echo "✅ Git tag ${{ steps.semver.outputs.version }}-${{ github.ref_name }} created and pushed"
+          fi
           # Attempt to compute coverage percent again if env var not set
           if [ -z "$FRONTEND_COVERAGE_PERCENT" ] && [ -f coverage/lcov.info ]; then
             COVERED_LINES=$(grep '^DA:' coverage/lcov.info | awk -F'[,:]' '$3>0{c++} END{print c+0}')
@@ -403,5 +596,11 @@ jobs:
           fi
           if [ -n "$FRONTEND_COVERAGE_PERCENT" ]; then
             echo "📊 Line coverage: ${FRONTEND_COVERAGE_PERCENT}%"; else echo "📊 Line coverage: n/a"; fi
-          echo "✅ Ready for deployment / push (runtime container test skipped)"
-          echo "ℹ️ Add runtime smoke tests later before push to registry"
+          echo "🚀 Frontend successfully deployed and ready for use"
+
+      - name: Cleanup sensitive files
+        if: always() && steps.decrypt-env.outputs.has_encrypted_env == 'true'
+        run: |
+          echo "🧹 Cleaning up sensitive files..."
+          rm -f ./.env ./team-private-key.pem ./temp-aes-key ./next-public-build-args.txt
+          echo "✅ Cleanup completed"

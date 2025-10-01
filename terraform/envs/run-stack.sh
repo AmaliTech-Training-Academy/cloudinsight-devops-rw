@@ -4,7 +4,7 @@
 #   ../run-stack.sh --create
 #   ../run-stack.sh --destroy
 # You can also pass --init-only to just init all modules.
-# Order (create): networking -> eks -> metrics-server -> eks-pod-identity-agent -> cluster-autoscaler -> aws-load-balancer-controller -> ingress-nginx -> cert-manager
+# Order (create): networking -> eks -> metrics-server -> eks-pod-identity-agent -> ebs-csi-driver -> cluster-autoscaler -> aws-load-balancer-controller -> ingress-nginx -> cert-manager
 # Destroy reverses the order.
 
 set -euo pipefail
@@ -15,6 +15,7 @@ APPLY_ORDER=(
   eks
   metrics-server
   pod-identity-agent 
+  ebs-csi-driver
   cluster-autoscaler
   aws-load-balancer-controller
   ingress-nginx

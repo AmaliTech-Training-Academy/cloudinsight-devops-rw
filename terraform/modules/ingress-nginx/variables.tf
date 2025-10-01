@@ -22,3 +22,15 @@ variable "service_annotations_extra" {
   type    = map(string)
   default = {}
 }
+
+variable "metrics_enabled" {
+  type        = bool
+  description = "Enable metrics collection for ingress-nginx controller"
+  default     = true
+}
+
+variable "metrics_port" {
+  type        = number
+  description = "Port for metrics endpoint"
+  default     = 10254
+}

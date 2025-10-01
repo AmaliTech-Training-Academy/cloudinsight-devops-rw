@@ -1,0 +1,32 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: postgres-client
+  namespace: user-service-dev
+spec:
+  serviceAccountName: user-service-sa
+  containers:
+    - name: postgres-client
+      image: postgres:15
+      command:
+        - sleep
+        - "3600"
+      env:
+        - name: PGHOST
+          value: "cloudinsight-dev-staging-dev-staging-postgres.ct4cmms0k59l.eu-west-1.rds.amazonaws.com"
+        - name: PGPORT
+          value: "5432"
+        - name: PGDATABASE
+          value: "cloudinsight_dev"
+        - name: PGUSER
+          value: "postgres"
+        - name: PGPASSWORD
+          value: "askljdfpaiowjeiwie"
+      resources:
+        requests:
+          memory: "128Mi"
+          cpu: "100m"
+        limits:
+          memory: "256Mi"
+          cpu: "200m"
+  restartPolicy: Never
